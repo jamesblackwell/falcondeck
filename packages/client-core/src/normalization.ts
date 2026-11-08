@@ -423,6 +423,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
   claude_autocompact_tokens: DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
   codex_autocompact_tokens: null,
+  bot_idle_compaction_enabled: true,
   bot_system_context_enabled: false,
   review_inbox_enabled: false,
   workspace_order: [],
@@ -2434,6 +2435,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       ? raw.claude_autocompact_tokens
       : DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
     bot_system_context_enabled: raw.bot_system_context_enabled === true,
+    bot_idle_compaction_enabled: raw.bot_idle_compaction_enabled !== false,
     codex_autocompact_tokens: isAutocompactTokens(raw.codex_autocompact_tokens)
       ? raw.codex_autocompact_tokens
       : null,

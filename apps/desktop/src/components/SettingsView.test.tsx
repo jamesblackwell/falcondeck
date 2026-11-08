@@ -95,6 +95,15 @@ describe('SettingsView deep links', () => {
     expect(input).toHaveValue(5)
   })
 
+  it('can disable idle bot compaction from General', () => {
+    const onUpdatePreferences = vi.fn()
+    render(<SettingsView {...props} initialSection="general"
+      preferences={{ bot_idle_compaction_enabled: true } as SettingsViewProps['preferences']}
+      onUpdatePreferences={onUpdatePreferences} />)
+    fireEvent.click(screen.getByRole('switch', { name: 'Compact idle bot homes' }))
+    expect(onUpdatePreferences).toHaveBeenCalledWith({ bot_idle_compaction_enabled: false })
+  })
+
   it('sets the Claude and Codex compact points from General', () => {
     const onUpdatePreferences = vi.fn()
     render(

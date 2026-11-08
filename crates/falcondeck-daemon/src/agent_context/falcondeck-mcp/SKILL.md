@@ -1,6 +1,6 @@
 ---
 name: falcondeck-mcp
-description: Use FalconDeck MCP tools during a turn. Call falcondeck_suggest_follow_ups near the end of work to offer next actions, falcondeck_rename_thread when the conversation's purpose has changed, falcondeck_list_threads and falcondeck_thread_summary to see what other threads are doing, and falcondeck_search/get/execute when the user wants automations or FalconDeck settings. Use these tools without waiting to be asked by name.
+description: Use FalconDeck session tools for coordination, task outcomes, follow-ups and notifications; read the control skill for settings and schedules.
 ---
 
 # FalconDeck MCP

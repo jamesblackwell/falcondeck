@@ -385,15 +385,9 @@ fn tool_definition(name: &str, _compatibility: &CompatibilityState) -> Value {
 
 fn tool_description(name: &str) -> &'static str {
     match name {
-        "falcondeck_search" => {
-            "Discover FalconDeck control capabilities before acting: returns operation ids, domains, schemas, constraints and related operations. Call this first with a natural-language query such as \"automation create\", then again with operation and detail=full to see the complete schema and worked examples before executing through falcondeck_execute."
-        }
-        "falcondeck_get" => {
-            "Read FalconDeck control state: reviews (James's decision inbox; filters status/bot/include_closed; open only by default), review (id required; shows his decisions and feedback), agent-control settings, automations (list or single by id), automation run history, recent control changes, and automation.health (per scheduled task over filters.days, default 7: runs, runs that found nothing to do, failures, agent time, threads used and review flags; use it to spot schedules that cost more than they give). Read a single automation before mutating it — mutations executed through falcondeck_execute require the revision you read (expected_revision), and stale revisions fail with revision_conflict."
-        }
-        "falcondeck_execute" => {
-            "Execute one registered FalconDeck control operation discovered via falcondeck_search, such as review.create (ask James for a decision with your recommendation and evidence; also review.update and review.withdraw), automation.create, automation.update or automation.run_now. Arguments are validated against the operation schema. Automation definition mutations require expected_revision from a prior falcondeck_get; automation.run_now never does. Pass an idempotency_key (8-128 chars) so identical retries replay the original result instead of duplicating the effect."
-        }
+        "falcondeck_search" => "Discover control operations. Search by query, then request the operation with detail=full for its schema, constraints and examples before executing.",
+        "falcondeck_get" => "Read reviews/decisions, agent-control settings, automations, run history, changes or automation.health (filters.days defaults to 7). Read an automation's revision before mutating its definition.",
+        "falcondeck_execute" => "Execute a discovered operation using its full schema. Definition mutations require expected_revision from get; run_now does not. Use an 8–128 character idempotency_key for retries. Publish reviews for user decisions, with recommendation and evidence.",
         _ => "FalconDeck control tool.",
     }
 }
@@ -463,7 +457,7 @@ async fn handle_tool_call(
     let body = response.text().await.unwrap_or_default();
     // Axum's body rejections (e.g. a missing `resource`) are plain text; pass
     // the reason through so the agent can fix the call instead of guessing.
-    let payload: Value = serde_json::from_str(&body).unwrap_or_else(|_| {
+    let mut payload: Value = serde_json::from_str(&body).unwrap_or_else(|_| {
         let reason = body.trim();
         let (code, message) = if status.is_client_error() && !reason.is_empty() {
             ("invalid_arguments", reason.to_string())
@@ -490,7 +484,48 @@ async fn handle_tool_call(
         let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(false);
         return tool_result(id, payload, !ok);
     }
+    if name == "falcondeck_search" {
+        compact_discovery_annotations(&mut payload);
+    }
     tool_result(id, payload, false)
+}
+
+/// Schema discovery must stay usable under the output cap. Trim only output
+/// schema prose/titles first; input rules, examples and validation stay intact.
+fn compact_discovery_annotations(payload: &mut Value) {
+    if payload.to_string().len() <= crate::tool_output::MAX_OUTPUT_BYTES { return; }
+    if let Some(results) = payload.get_mut("results").and_then(Value::as_array_mut) {
+        for result in results {
+            if let Some(schema) = result.get_mut("output_schema") {
+                strip_schema_annotations(schema);
+            }
+        }
+    }
+}
+
+fn strip_schema_annotations(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else { return; };
+    object.remove("description");
+    object.remove("title");
+    for (key, value) in object {
+        match key.as_str() {
+            // These are maps of field/definition names, not schema objects:
+            // a property literally named "description" must remain present.
+            "properties" | "$defs" | "definitions" | "patternProperties" | "dependentSchemas" => {
+                if let Some(map) = value.as_object_mut() {
+                    for child in map.values_mut() { strip_schema_annotations(child); }
+                }
+            }
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
+                if let Some(array) = value.as_array_mut() {
+                    for child in array { strip_schema_annotations(child); }
+                }
+            }
+            "items" | "additionalProperties" | "unevaluatedProperties" | "contains" |
+            "propertyNames" | "not" | "if" | "then" | "else" => strip_schema_annotations(value),
+            _ => {}
+        }
+    }
 }
 
 /// MCP treats omitted `arguments` as `{}`. A present non-object is a
@@ -505,17 +540,17 @@ fn call_arguments(params: &Value) -> Result<Value, &'static str> {
 
 /// Builds a `tools/call` result with both structured and text content.
 fn tool_result(id: Value, structured: Value, is_error: bool) -> Value {
+    let truncated = structured.to_string().len() > crate::tool_output::MAX_OUTPUT_BYTES;
+    let structured = crate::tool_output::bounded_tool_value(structured);
     let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{\"ok\":false}".to_string());
-    success_response(
-        id,
-        json!({
-            "content": [
-                { "type": "text", "text": text }
-            ],
-            "structuredContent": structured,
-            "isError": is_error,
-        }),
-    )
+    let mut result = json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": is_error,
+    });
+    if !truncated {
+        result["structuredContent"] = structured;
+    }
+    success_response(id, result)
 }
 
 fn success_response(id: Value, result: Value) -> Value {
@@ -541,6 +576,53 @@ mod tests {
             workspace_path: Some("/repo".to_string()),
             thread_id: None,
         }
+    }
+
+    #[test]
+    fn every_single_operation_keeps_complete_input_rules_under_the_cap() {
+        use falcondeck_core::control::{ControlSearchRequest, SearchDetail};
+        for capability in crate::control::registry::capabilities() {
+            let results = crate::control::registry::search(&ControlSearchRequest {
+                operation: Some(capability.id.into()), detail: SearchDetail::Full,
+                ..Default::default()
+            }, &|_| true);
+            if results.is_empty() { continue; } // retired operations
+            let mut payload = json!({"results": results});
+            let input = payload["results"][0]["input_schema"].clone();
+            let examples = payload["results"][0]["examples"].clone();
+            compact_discovery_annotations(&mut payload);
+            assert_eq!(payload["results"][0]["input_schema"], input);
+            assert_eq!(payload["results"][0]["examples"], examples);
+            assert!(payload.to_string().len() <= crate::tool_output::MAX_OUTPUT_BYTES,
+                "{} still needs {} bytes", capability.id, payload.to_string().len());
+            let result = tool_result(json!(1), payload.clone(), false);
+            assert_eq!(result["result"]["structuredContent"], payload);
+        }
+    }
+
+    #[test]
+    fn schema_annotation_trimming_preserves_description_fields_and_literal_values() {
+        let mut schema = json!({"type":"object", "description":"prose", "properties": {
+            "description": {"type":"string", "description":"field prose"},
+            "constant": {"const": {"description":"literal"}}
+        }});
+        strip_schema_annotations(&mut schema);
+        assert_eq!(schema["properties"]["description"]["type"], "string");
+        assert_eq!(schema["properties"]["constant"]["const"]["description"], "literal");
+        assert!(schema.get("description").is_none());
+    }
+
+    #[test]
+    fn model_output_cap_covers_structured_content_too() {
+        let value = json!({"ok": true, "result": format!("HEAD{}TAIL", "x".repeat(60_000))});
+        let response = tool_result(json!(1), value, false);
+        let result = &response["result"];
+        assert!(result.get("structuredContent").is_none());
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.len() <= crate::tool_output::MAX_OUTPUT_BYTES);
+        assert!(text.contains("HEAD") && text.contains("TAIL"));
+        assert!(text.contains("middle omitted"));
     }
 
     #[test]

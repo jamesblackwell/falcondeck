@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
 
 mod context;
+mod idle_compaction;
 mod delivery;
 pub(in crate::app) use delivery::ClaudeBotContextReceipt;
 pub(in crate::app) use context::AgentContextPlan;

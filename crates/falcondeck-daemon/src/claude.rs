@@ -434,6 +434,7 @@ impl ClaudeRuntime {
             command.env("PATH", path);
         }
         strip_terminal_advertising_env(&mut command);
+        configure_tool_output_limit(&mut command);
 
         if let Some(existing_session_id) = session_id {
             command.arg("--resume").arg(existing_session_id);
@@ -468,6 +469,8 @@ impl ClaudeRuntime {
             .and_then(|base_url| self.write_hook_settings_file(base_url, settings_dir))
         {
             command.arg("--settings").arg(settings_path);
+        } else {
+            command.arg("--settings").arg(tool_output_settings().to_string());
         }
         let mcp_config = self.write_mcp_config_file(settings_dir, builtin).await;
         if let Some(lease) = &mcp_config {
@@ -1185,6 +1188,7 @@ fn build_claude_hook_settings(base_url: &str) -> String {
     })
     .to_string();
     json!({
+        "bashOutputMaxChars": crate::tool_output::MAX_OUTPUT_BYTES,
         "hooks": {
             "PreToolUse": [{
                 "matcher": "*",
@@ -1416,6 +1420,16 @@ fn claude_model(
         service_tiers: Vec::new(),
         default_service_tier: None,
     }
+}
+
+// Approximately 10k tool-output tokens at the review's measured 2.43 chars/token.
+// Native Claude owns its preview/file recovery and failed-command excerpts.
+fn tool_output_settings() -> Value {
+    json!({"bashOutputMaxChars": crate::tool_output::MAX_OUTPUT_BYTES})
+}
+
+fn configure_tool_output_limit(command: &mut Command) {
+    command.env("BASH_MAX_OUTPUT_LENGTH", crate::tool_output::MAX_OUTPUT_BYTES.to_string());
 }
 
 const AUTOCOMPACT_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -3770,6 +3784,18 @@ mod tests {
             content[2]["text"],
             format!("[image attachment: {}]", second_path.to_string_lossy())
         );
+    }
+
+    #[test]
+    fn bash_output_limit_is_set_with_and_without_approval_hooks() {
+        let mut command = Command::new("claude");
+        configure_tool_output_limit(&mut command);
+        assert!(command.as_std().get_envs().any(|(key, value)|
+            key == "BASH_MAX_OUTPUT_LENGTH" && value == Some(std::ffi::OsStr::new("24000"))));
+        let hooks: Value = serde_json::from_str(&build_claude_hook_settings("http://localhost")).unwrap();
+        assert_eq!(hooks["bashOutputMaxChars"], 24_000);
+        assert_eq!(tool_output_settings()["bashOutputMaxChars"], 24_000);
+        assert!(tool_output_settings().get("hooks").is_none());
     }
 
     #[test]

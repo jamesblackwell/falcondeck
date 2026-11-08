@@ -320,6 +320,8 @@ async fn handle_tool_call(
 }
 
 fn tool_result(id: Value, structured: Value, is_error: bool, metadata: Option<Value>) -> Value {
+    let truncated = structured.to_string().len() > crate::tool_output::MAX_OUTPUT_BYTES;
+    let structured = crate::tool_output::bounded_tool_value(structured);
     let text = structured
         .get("result")
         .and_then(Value::as_str)
@@ -333,6 +335,9 @@ fn tool_result(id: Value, structured: Value, is_error: bool, metadata: Option<Va
         "structuredContent": structured,
         "isError": is_error,
     });
+    if truncated {
+        result.as_object_mut().unwrap().remove("structuredContent");
+    }
     if let Some(metadata) = metadata {
         result["_meta"] = metadata;
     }
@@ -354,6 +359,19 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_output_cap_covers_structured_content_too() {
+        let value = json!({"ok": true, "result": format!("HEAD{}TAIL", "x".repeat(60_000))});
+        let response = tool_result(json!(1), value, false, Some(json!({"owner": "kept"})));
+        let result = &response["result"];
+        assert!(result.get("structuredContent").is_none());
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.len() <= crate::tool_output::MAX_OUTPUT_BYTES);
+        assert!(text.contains("HEAD") && text.contains("TAIL"));
+        assert!(text.contains("middle omitted"));
+    }
 
     #[test]
     fn markdown_tool_results_are_plain_text_on_the_bridge() {

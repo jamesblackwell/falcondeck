@@ -135,6 +135,9 @@ pub struct FalconDeckPreferences {
     /// Codex's own default for the model.
     #[serde(default)]
     pub codex_autocompact_tokens: Option<u32>,
+    /// Compact large idle Claude bot homes before their one-hour cache expires.
+    #[serde(default = "default_true")]
+    pub bot_idle_compaction_enabled: bool,
     /// User-defined order for workspaces in project navigation.
     #[serde(default)]
     pub workspace_order: Vec<String>,
@@ -193,6 +196,7 @@ impl Default for FalconDeckPreferences {
             max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
             claude_autocompact_tokens: DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
             codex_autocompact_tokens: None,
+            bot_idle_compaction_enabled: true,
             workspace_order: Vec::new(),
             hidden_workspace_ids: Vec::new(),
             workspace_colors: BTreeMap::new(),
@@ -749,6 +753,9 @@ pub struct UpdatePreferencesRequest {
     /// restores Codex's own default.
     #[serde(default, deserialize_with = "deserialize_present_option")]
     pub codex_autocompact_tokens: Option<Option<u32>>,
+    /// Enable or disable idle compaction of bot homes.
+    #[serde(default)]
+    pub bot_idle_compaction_enabled: Option<bool>,
     /// Optional workspace order update for project navigation.
     #[serde(default)]
     pub workspace_order: Option<Vec<String>>,

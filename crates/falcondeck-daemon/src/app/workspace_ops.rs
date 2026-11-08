@@ -4239,10 +4239,22 @@ pub(super) async fn interrupt_turn(
 
 pub(super) async fn compact_thread(
     app: &AppState,
+    request: CompactThreadRequest,
+) -> Result<CommandResponse, DaemonError> {
+    compact_thread_checked(app, request, false).await
+}
+
+/// Idle maintenance uses the same admission gate and provider route as HTTP.
+pub(super) async fn compact_thread_checked(
+    app: &AppState,
     mut request: CompactThreadRequest,
+    idle_only: bool,
 ) -> Result<CommandResponse, DaemonError> {
     let gate = app.variant_gate(&request.workspace_id, &request.thread_id).await;
     let _guard = gate.lock().await;
+    if idle_only && !app.idle_bot_compaction_due(&request.workspace_id, &request.thread_id).await {
+        return Ok(CommandResponse { ok: true, message: Some("idle compaction skipped".into()) });
+    }
     app.restore_variant_for_turn(&request.workspace_id, &request.thread_id).await?;
     request.instructions = request
         .instructions
@@ -4252,6 +4264,11 @@ pub(super) async fn compact_thread(
     let _claude_history_guard = app
         .claude_history_for_admission(&request.workspace_id, &request.thread_id)
         .await?;
+    // History admission may involve disk work. Do not cross the cache-expiry
+    // guard or ignore a preference change while preparing the native session.
+    if idle_only && !app.idle_bot_compaction_due(&request.workspace_id, &request.thread_id).await {
+        return Ok(CommandResponse { ok: true, message: Some("idle compaction skipped".into()) });
+    }
     let thread = app
         .thread_summary(&request.workspace_id, &request.thread_id)
         .await?;

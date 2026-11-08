@@ -343,3 +343,12 @@ An accepted turn that immediately dies has already cleared its reports' wake
 and escalation eligibility: later home turns still carry them, and the home
 error follows the normal notification path. These limits are deferred, rather
 than guarantees of durable execution after provider acceptance.
+
+
+## Idle context maintenance
+
+General → Agents → Compact idle bot homes is on by default. Active Claude
+homes with at least 150K live context tokens can compact after 50 idle minutes,
+only before their cache expires and without running or queued work. Disable
+`bot_idle_compaction_enabled` to opt out. See the [policy, tests and savings
+estimate](token-efficiency-implementation.md#idle-bot-home-compaction-3).

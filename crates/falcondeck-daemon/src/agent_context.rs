@@ -215,23 +215,17 @@ pub fn append_instructions(
     suggest_follow_ups: bool,
 ) -> String {
     let mut text = String::from(
-        "You are running inside FalconDeck, a local-first control plane that orchestrates coding agents (Codex, Claude, ACP CLIs) from the FalconDeck desktop and mobile apps. Your threads, turns and tool approvals are managed by FalconDeck.\n\n\
-         - Use the FalconDeck MCP tools available in this session when they help with the user's task; do not wait for the user to name them.\n",
+        "FalconDeck manages this session, turns and approvals. Use the available FalconDeck MCP tools when useful; do not wait for the user to name them.\n\n\
+         - Inspect other threads only for task context or coordination. Tools describe filtering, paging, messaging and child limits; approvals stay in the UI.\n\
+         - Delegation tracking survives restarts. Use result_delivery=\"wake\" when you must act on the result, otherwise batch. Failures, needs-input, interruption and overdue tasks wake regardless. In bot homes, read reports then call falcondeck_acknowledge_results with their report_ids; never acknowledge by messaging their source.\n\
+         - Pending tasks: arm a timed background wake, then falcondeck_task_state waiting with reason and future RFC3339 deadline; finished when done. If no background wake exists, schedule a one-time current-thread automation; if neither works, tell the owner to arrange resumption. Idle does not prove completion. After restart verify external jobs before retrying: background processes may have died and are not automatically retried.\n\
+         - Notify rarely, only for critical attention or requested results. Normal replies already alert the user, except in bot scheduled-run threads. Decisions belong in reviews. Keep secrets out of push title/summary; report body is encrypted.\n\
+         - Link tasks as [Task name](falcondeck://thread/THREAD_ID), using the returned id, never a title or guessed ID.\n\
+         - For settings, reviews and automations: falcondeck_search (detail: \"full\" before executing), falcondeck_get, falcondeck_execute. Read schemas and worked examples first. Conversation follow-ups use thread kind current; managed threads are for unrelated standing schedules.\n",
     );
-    text.push_str("- Only look at other threads when the task needs their context or coordination, not as a routine startup step. `falcondeck_list_threads` shows what is being worked on (status, last request, latest reply per thread); `falcondeck_thread_summary` digests outcomes, files, commits and checks; `falcondeck_view_thread` reads messages; `falcondeck_thread_changes` returns only what changed since your last check. `falcondeck_message_thread` steers another thread's active turn (it queues only if the receiver cannot take input mid-turn, and your queued messages to one thread merge into one entry); it also reaches the user's bots (named coordinators listed at the top of `falcondeck_list_threads`) by name. `falcondeck_create_thread` starts independent work from a self-contained prompt; no context is copied by default and the user limits how many children run at once (the `falcondeck_create_thread` description and its refusal state the current limit; default five). Approvals stay in the FalconDeck UI.\n");
-    text.push_str("- Keep proactive notifications rare: send them only for critical issues requiring attention or when the user explicitly requests notifications. Bot delegations and follow-ups are daemon tracked across restarts. Use `result_delivery: \"wake\"` when you need to act on the outcome; otherwise `batch` (default) includes it in your next turn. Failed, needs-input, interrupted and overdue outcomes wake regardless of that setting. In the bot home, read report ids and call `falcondeck_acknowledge_results`; reports remain pending until receipt. Never acknowledge reports by messaging their source. Long-running work alone does not justify notifications.\n");
-    text.push_str("- For tracked tasks, declare `falcondeck_task_state` with state `waiting`, a reason and a future RFC3339 deadline when work remains pending, and `finished` when done. Never end a turn just to wait for a time or a job: arm a timed background wake and declare the wait. If the harness has no background wake, arrange a one-time automation in the current thread; if neither is available, tell the owner to arrange resumption. Background processes do not survive daemon restart reliably; the outcome tracker reports interruption and does not retry workers; user-configured session recovery can still resume them. Unmarked idle means completion unverified.\n");
-    text.push_str("- `falcondeck_notify` reaches the user's phone when something important happened and no decision is needed, optionally with a Markdown report. It is rate limited and rare by default: your final reply already reaches them, except in a thread created for a bot's scheduled run, where it stays in the thread without an alert. Use it only for what they would want to hear about while away, or when asked. If they must decide, publish a review instead; a review asks for a decision, a notice does not.\n");
-    text.push_str("- Link to other FalconDeck tasks as `[Task name](falcondeck://thread/THREAD_ID)`, using the exact thread_id from FalconDeck tools, never a title or guessed ID. The destination survives renames.\n");
     if suggest_follow_ups {
-        text.push_str(
-            "- Near the end of a turn, if useful next steps remain, call `falcondeck_suggest_follow_ups` once with 1–5 short actions (imperative labels, at most 30 characters). It does not block the turn. Skip it only when nothing useful is left to offer. The user sees them in the UI, so never mention, list, or restate them in your reply; end the turn with a normal reply.\n",
-        );
+        text.push_str("- If useful next steps remain, call falcondeck_suggest_follow_ups once (1–5 imperative labels, max 30 characters); never mention, list, or restate them in your reply.\n");
     }
-    text.push_str(
-        "- Control FalconDeck itself with the `falcondeck` MCP tools: `falcondeck_search` to discover operations, `falcondeck_get` to read state, `falcondeck_execute` to run one (for example scheduled automations). Use those when the user asks about automations, schedules, reviews, or FalconDeck settings. When the user asks you to check back, follow up, or re-run something later from within a conversation, schedule it with thread kind `current` so it continues in this thread; use a managed thread only for standing schedules unrelated to this conversation.\n\
-         - Before `falcondeck_execute`, call `falcondeck_search` with `detail: \"full\"` to get the operation's schema and worked examples.",
-    );
     if let Some(path) = mcp_skill {
         text.push_str(&format!(
             "\n- FalconDeck MCP usage (read on demand): {}",
@@ -291,9 +285,20 @@ mod tests {
         assert!(with.contains("/tmp/skills/falcondeck-control/SKILL.md"));
         assert!(with.contains("/tmp/skills/cua-driver/SKILL.md"));
         assert!(with.contains("`cua-driver` MCP server"));
+        assert!(with.len() < 4_000, "always-on context grew: {} bytes", with.len());
         assert!(with.contains("name: \"falcondeck-agent\""));
         assert!(with.contains("Open agent browser"));
         assert!(!with.contains("Only mention or use FalconDeck when the user asks"));
+    }
+
+    #[test]
+    fn compact_append_preserves_coordinator_correctness_rules() {
+        let text = append_instructions(None, None, None, false);
+        for rule in ["falcondeck_acknowledge_results", "report_ids", "future RFC3339 deadline",
+            "timed background wake", "current-thread automation", "verify external jobs",
+            "not automatically retried", "Keep secrets out of push title/summary", "approvals stay in the UI"] {
+            assert!(text.contains(rule), "missing coordinator rule: {rule}");
+        }
     }
 
     #[test]

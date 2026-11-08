@@ -10281,3 +10281,42 @@ for line in sys.stdin:
         falcondeck_core::reviews::ReviewDelivery::Delivered { .. }));
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn idle_bot_compaction_rechecks_preferences_and_queue_under_admission_gate() {
+    let temp = tempdir().unwrap();
+    let (app, workspace) = busy_thread_app(&temp, AgentProvider::CLAUDE, Default::default()).await;
+    let thread = "thread-steer";
+    let at = Utc::now() - Duration::minutes(50);
+    app.with_managed_thread_mut(&workspace, thread, |managed| {
+        managed.summary.status = ThreadStatus::Idle;
+        managed.summary.native_session_id = Some("native".into());
+        managed.summary.updated_at = at;
+    }).await.unwrap();
+    app.inner.preferences.lock().await.bots.push(serde_json::from_value(json!({
+        "id": "bot", "name": "Bot", "workspace_id": workspace, "thread_id": thread,
+        "dedicated_workspace": false, "space_path": temp.path().to_string_lossy()
+    })).unwrap());
+    app.inner.thread_token_usage.lock().unwrap().insert(thread.into(), falcondeck_core::ThreadTokenUsage {
+        total: falcondeck_core::TokenUsageBreakdown { total_tokens: 150_000, input_tokens: 1_000,
+            cached_input_tokens: 149_000, output_tokens: 0, reasoning_output_tokens: 0 },
+        last: None, model_context_window: None, updated_at: Some(at),
+    });
+    assert!(app.idle_bot_compaction_due(&workspace, thread).await);
+    app.with_managed_thread_mut(&workspace, thread, |managed| {
+        managed.summary.queued_turns.push(falcondeck_core::QueuedTurnSummary {
+            id: "queued".into(), preview: "pending".into(), text: "pending".into(),
+            attachment_count: 0, queued_at: Utc::now(), held_reason: None,
+        });
+    }).await.unwrap();
+    assert!(!app.idle_bot_compaction_due(&workspace, thread).await);
+    app.with_managed_thread_mut(&workspace, thread, |managed| managed.summary.queued_turns.clear()).await.unwrap();
+    app.inner.preferences.lock().await.bot_idle_compaction_enabled = false;
+    // This is the timer's path after candidate selection. No provider can run
+    // when the user disables the preference while it waits on the gate.
+    let response = super::workspace_ops::compact_thread_checked(&app, falcondeck_core::CompactThreadRequest {
+        workspace_id: workspace, thread_id: thread.into(), instructions: None,
+    }, true).await.unwrap();
+    assert_eq!(response.message.as_deref(), Some("idle compaction skipped"));
+    assert_eq!(app.thread_summary("workspace-steer", thread).await.unwrap().status, ThreadStatus::Idle);
+}
