@@ -294,6 +294,15 @@ impl AppState {
         {
             return Err(DaemonError::Rpc("Not a managed Git worktree".into()));
         }
+        if git(&v.path, &["symbolic-ref", "--short", "HEAD"])
+            .await?
+            .trim()
+            != v.branch
+        {
+            return Err(DaemonError::Rpc(
+                "Variant branch changed; retained for review".into(),
+            ));
+        }
         let top = git(&v.path, &["rev-parse", "--show-toplevel"]).await?;
         if tokio::fs::canonicalize(top.trim()).await.ok().as_ref() != Some(&canonical)
             || tokio::fs::canonicalize(project).await.ok().as_ref() == Some(&canonical)
@@ -751,7 +760,8 @@ impl AppState {
             let ws = self.inner.workspaces.lock().await;
             let protected = ws.values().any(|w| {
                 Path::new(&w.summary.path).starts_with(&path)
-                    || path.starts_with(&w.summary.path)
+                    || (Path::new(&w.summary.path).join(".git").exists()
+                        && path.starts_with(&w.summary.path))
                     || w.threads.values().any(|t| {
                         t.summary.variant.as_ref().is_some_and(|v| {
                             Path::new(&v.path).starts_with(&path) || path.starts_with(&v.path)
