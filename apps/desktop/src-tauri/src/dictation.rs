@@ -348,6 +348,8 @@ unsafe extern "C" {
     #[cfg(test)]
     fn fd_dictation_test_capture_check_contract() -> i32;
     #[cfg(test)]
+    fn fd_dictation_test_capture_failure_contract() -> bool;
+    #[cfg(test)]
     fn fd_dictation_test_recovery_audio_contract() -> bool;
     #[cfg(test)]
     fn fd_dictation_test_rewrite_selection_contract() -> bool;
@@ -2380,6 +2382,12 @@ mod tests {
         rewrite_instruction, transcription_error_is_missing_speech, validate_local_daemon_url,
         validate_recording_path, DictationProvider, RetryRoute,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_capture_reports_storage_permission_and_device_errors() {
+        assert!(unsafe { super::fd_dictation_test_capture_failure_contract() });
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
