@@ -754,9 +754,6 @@ impl CodexSession {
         for override_arg in mcp.overrides {
             command.arg("-c").arg(override_arg);
         }
-        command
-            .arg("-c")
-            .arg(crate::connectors::CODEX_TOOL_OUTPUT_TOKEN_LIMIT_OVERRIDE);
         for (key, value) in mcp.env {
             command.env(key, value);
         }
