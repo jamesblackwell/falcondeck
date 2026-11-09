@@ -2346,6 +2346,7 @@ impl AppState {
         let workspaces = self.inner.workspaces.lock().await.len();
         HealthResponse {
             free_bytes: crate::variant::available_disk(&self.storage_root()).await,
+            volumes: self.storage_volumes().await,
             ok: true,
             version: self.inner.daemon.version.clone(),
             workspaces,

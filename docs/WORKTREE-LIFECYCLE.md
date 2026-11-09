@@ -47,8 +47,10 @@ git sparse-checkout disable          # materialize the full tree
 Before managed reclamation, both the daemon and GC script save the worktree's
 actual sparse patterns under the shared Git directory's `falcondeck-variants/`.
 Restore uses that recipe, including paths added back or a disabled sparse mode.
-A variant created full stays full even if the project defaults subsequently
-change. Legacy variants without a saved recipe also restore full. External
+A variant with a saved full recipe stays full if project defaults subsequently
+change. A clean legacy variant without a saved recipe adopts the project sparse
+default on its next restore. Dirty snapshots preserve the original selection and
+materialized changes. External
 removal that bypasses managed reclamation cannot capture subsequent manual
 pattern edits; the last saved recipe is the recovery point.
 
@@ -98,9 +100,9 @@ ref; restore never substitutes main.
 Unarchive reports tracked-checkout restoration failures to its caller and leaves
 the thread archived. Send/resume, review, compact, Commit, Ship, and file access
 restore a reclaimed checkout before using it. Mutating and file-view operations
-hold the same per-thread gate as final reclamation. Expensive remote safety
-verification runs outside this gate, then thread eligibility and local safety
-are checked again after acquiring it.
+hold the same per-thread gate as final reclamation. Thread eligibility and local
+safety are checked again after acquiring it. Local branches pin unpublished
+commits; reclamation does not need network reachability.
 
 ### Dependency provisioning
 
@@ -139,183 +141,155 @@ that removal attempt.
 
 ## Reclamation
 
+Reclamation keeps the thread, branch, native history and sparse recipe. It first
+moves the checkout into a **recoverable quarantine**, not permanent deletion.
+The local branch pins committed work even when it has never been pushed.
+
 | Event | Behaviour |
 |---|---|
-| Archive (single/all) | Attempt safe reclamation in the background. |
-| Successful live turn completion | Update task activity; daily policy uses 3/14-day idle thresholds. |
-| Periodic maintenance | Check free disk every five minutes; run the configured daily storage policy. |
-| Resume/unarchive or checkout access | Restore missing checkout from the kept branch/recipe. |
-| Delete thread/workspace | Return without waiting for remote cleanup; safe cleanup runs in the background. |
-| Daemon startup | Restore settings/run log; daily policy includes managed variants after fresh safety checks. |
+| Archive (single/all) | Attempt safe quarantine in the background. |
+| Successful live turn completion | Update task activity; clean checkouts become candidates after more than 24 idle hours. |
+| Periodic maintenance | Check each managed filesystem every five minutes; run daily cleanup at most once per 24 hours. |
+| Resume/unarchive or checkout access | Cancel intact quarantine or restore from the kept checkpoint/branch/recipe. |
+| Delete thread/workspace | Return without waiting; safe reclamation runs in the background. |
+| Daemon startup | Recover persisted receipts and apply current safety checks. |
 
-### Daily daemon storage policy
+### Daily daemon policy
 
-A five-minute maintenance tick measures free space independently of cleanup.
-It starts at most one daemon-owned cleanup worker per day, using a durable
-`storage-last-scheduled.json` start time independent of manual/archive runs. This is a zero-token daemon job, not an agent
-automation. A restart does not replay a daily run already started. The daily
-policy intentionally inventories the existing managed backlog; the measured
-9 November dry run and its expected first-run savings are recorded in
-[the storage audit](reports/2026-11-09-storage-audit.md).
+The daemon owns this zero-token background job. A durable
+`storage-last-scheduled.json` marker is independent of manual/archive runs;
+restart does not replay a daily run already started. `storage-preferences.json`
+contains off switches for scheduling, caches, clean-checkout reclamation and
+warnings. Artifact/experiment deletion is no longer supported. Legacy preference
+keys for it are accepted for compatibility, ignored, and omitted when saved.
+“Clean up now” explicitly confirms the same policy. Invalid settings fail closed.
 
-`storage-preferences.json` has separate switches for the schedule, cache cleanup,
-checkout reclamation, aged artifact deletion, aged experiment deletion and
-warnings. Scheduled cache cleanup and reclamation default on; aged artifact and
-experiment deletion default off. Disabling the schedule leaves explicit,
-confirmed “Clean up now” available. Disabling reclamation also disables the
-archive-triggered background attempt. Invalid persisted settings fail closed.
-Old successful-completion eligibility markers are retained for state compatibility;
-the production timer no longer uses their 72-hour policy.
+- Main project checkouts, clones, shared/changed ownership, detached or changed
+  branches, symlink roots and symlink ancestors are retained.
+- Running, waiting, queued, dispatching and dependency-preparation tasks are
+  protected. Accessible processes with cwd/open files inside a checkout block
+  cleanup. Task activity and non-cache checkout activity must be over 24 hours old.
+- **Clean** checkouts can be reclaimed after more than **24 idle hours**, or
+  archival, with no tracked/untracked edits, hidden present index flags or Git
+  operation in progress. Recursive checkout and worktree HEAD/index/reflog
+  activity must also be over 24 hours old. Unpublished commits are safe on the
+  kept branch; no fetch or remote publication is required.
+- Cache cleanup can apply to clean or dirty variants after **three idle days**.
+  Its 24-hour recency test uses tracked/non-ignored files and thread activity,
+  rather than mtimes inside the cache. Sparse omissions are not deletions;
+  genuinely deleted tracked paths use their nearest surviving parent for activity.
+- An ignored name alone never grants deletion authority. The current exact cache
+  locations are `node_modules`, `frontend/node_modules`, `target` and
+  `frontend/target`. Node installs need installed-package receipts and manifests;
+  pnpm receipts must match project lock input; supported command shims must match
+the generated template and a manifest-declared installed binary. Extra authored
+shim content is retained. Rust caches require Cargo input,
+  a rustc receipt and CACHEDIR.TAG, with known generated layout and positive
+compiler artifact/metadata formats. Unknown target descendants are retained. Unknown package
+  roots, nested Git state, databases (including SQLite headers), private key/env
+  files, special files and authored Rust-target content are refused. Generic
+  `build`, `.cache`, `dist` and `vendor` paths are not disposable merely by name.
+- A local-only project hook can restrict the supported exact cache list:
+  `git config --local falcondeck.storageCaches '["frontend/node_modules"]'`.
+  Nonempty lists select those supported locations; an absent/empty list uses
+  defaults. Relative paths cannot contain `.`, `..` or `.git`; configuration
+  cannot make an unsupported directory safe. No project script is executed.
+- Each cache must additionally be ignored, contain no tracked descendants and
+  pass containment/identity/process checks. The **same content proof** protects
+  ignored data during checkout reclamation, including manual dirty snapshots.
+  Differing environment files and other ignored non-cache data block removal.
+- Artifacts/experiments older than 30 days are **candidates only**, never
+  automatically deleted. Native Codex stores and logs remain report-only.
+  No repository GC apply script is invoked.
 
-- Only managed Git worktree variants are eligible. Main project checkouts,
-  shared paths, standalone clones, symlink roots and symlink ancestors stay.
-- Running, waiting, queued and dispatching tasks stay, as do checkouts with live
-  processes. Task activity must be more than 24 hours old.
-- Automatic checkout reclamation requires a clean tree, including no untracked
-  files or hidden index flags, and recursive filesystem activity older than
-  24 hours, including the worktree-specific HEAD, index and HEAD reflog.
-- After more than 3 idle days, caches can be cleared in **clean or dirty**
-  variants. For this action, 24-hour filesystem activity is measured only on
-  tracked and non-ignored untracked files; cache mtimes do not block cleanup.
-  Absent skip-worktree paths are sparse omissions, not recent activity. Actual
-  tracked deletions use the nearest surviving parent directory for recency.
-  Each directory must be Git-ignored and have no tracked descendants. Known
-  caches include `node_modules`, `.cache`, `build`, `DerivedData`, `.cxx`,
-  `.gradle`, `Pods`, `.next`, `.nuxt`, `.turbo`, `.parcel-cache`, `.svelte-kit`,
-  Python/PHP/framework caches, and anchored `target`, `dist`, `vendor`, `.venv`
-  and frontend/iOS/Android build roots. Authored non-ignored files stay.
-- A project may extend cache paths with a **local-only**, declarative JSON list:
-  `git config --local falcondeck.storageCaches '["frontend/.cache"]'`.
-  Only relative paths with no `.`/`..`/`.git` components are accepted. No project
-  script is executed. Additional paths still need the same ignored/untracked,
-  activity, process and age checks; configuration cannot override safety.
-- Clean archived variants, or variants idle more than 14 days, use the shared
-  reclamation assessment and finish path below. Live remote verification remains
-  mandatory: a branch with unpushed/unmerged commits stays. Branches, task history
-  and sparse recipes are retained for restore.
-- Artifacts and experiments with no descendant modified within 30 days appear
-  as candidates. Deletion needs the corresponding opt-in. Git repositories,
-  main/managed checkout paths, symlinks, recent files and active-process paths
-  stay even after opt-in; Git-containing experiments require manual review.
-- Native Codex workspace databases and file logs are report-only. The job never
-  deletes or compacts them, and never invokes a repository's GC apply script.
+Scans/hashing use dedicated background-QoS threads on macOS. Git operations run
+at nice 10. Audit writes precede mutation. The small log retains 30 runs, each
+with start/finish times and up to 100 bounded result entries; an unfinished run
+is explicit. Old 72-hour completion markers remain state-compatible but do not
+control the production timer.
 
-Scans and cache/artifact removal run on dedicated background-QoS threads on
-macOS; Git checks/removal run at nice 10. Network work happens outside task
-admission gates. Reclamation repeats state, local Git and process checks under
-the task gate; cache deletion holds the same gate and rechecks before removal.
-External writers which do not use daemon gates can still race filesystem checks.
+### Quarantine and partial-failure recovery
 
-The log retains 30 runs, each with an id, start/finish time and up to 100 bounded
-result entries. A start without a finish identifies an interrupted run. Log
-writes precede cleanup; failure to persist the audit prevents new deletion.
+Before mutation, persist a receipt in the project's shared Git directory at
+`falcondeck-variants/<slug>.quarantine.<uuid>.json`. The receipt records original
+and quarantine paths, filesystem identity, a full byte fingerprint, recovery
+checkpoint and transaction phase. Metadata files and containing directories are
+synced before dependent mutations. A small project pointer beside the checkouts
+keeps quarantine discovery and volume warnings alive after workspace deletion.
+It retains resolved Git metadata paths; health also resolves bounded `.git` and
+`commondir` pointers for projects using separate Git directories or linked checkouts.
+Checkout snapshots also pin their original
+index. Atomically rename into a private sibling
+`.storage-quarantine-<slug>-<uuid>` on the same filesystem, repair the Git worktree
+registration, and reverify. Cross-device rename refuses without a copy/delete
+fallback. Failed verification restores the original name when possible; if a
+writer recreated it, both paths are retained for recovery.
 
-### Storage settings and local API
+A quarantine lasts **at least 24 hours**. A subsequent enabled daily/manual run
+rechecks bytes, index, ignored-content proof, identity and processes before purge.
+Late writes retain the directory. The task admission gate remains held. Starting
+another task cannot authorize deletion of a running/queued variant. Disabling the
+relevant cache/reclamation switch also retains its pending quarantines.
 
-Mac Settings → Storage shows category/project allocated totals, largest managed
-variants with task age/status, aged artifact/experiment candidates and recent
-runs. Categories include unmanaged worktrees, bot homes and other data under
-Other. Cache/content subtotals are parts of Variants, not additional disk use.
-APFS shared extents mean allocated totals are estimates, not physical recovery.
+Purge writes a `purging` phase before removal. Failure/interruption is reported
+as **RecoveryRequired**, never as an intact **Kept** checkout. Restore does not
+accept a surviving tracked file as proof of completeness when a snapshot is
+pending. It preserves partial residue at a separate recovery path, then
+reconstructs the saved working tree and index before admitting the task.
+Retained residue must reconnect its existing Git index before replacement;
+relative registrations and interrupted/missing `.git` links are reconciled. Original
+residue is never silently overwritten. An intact quarantine can be renamed back;
+clean legacy checkouts adopting sparse defaults are recreated with that recipe.
+The first run releases **no physical space immediately**: bytes remain in
+quarantine until a later eligible purge. Snapshot objects also consume space.
 
-All destructive UI actions require explicit confirmation. Running tasks can only
-be opened. Eligible dirty tasks can have caches cleared, but automatic cleanup
-never removes their checkout. Clean rows offer ordinary reclamation. Clean up
-now runs the scheduled policy.
+External writers do not participate in daemon locks. Atomic rename removes the
+original pathname, a full grace period permits in-flight writers to settle, and
+late changes/processes prevent purge. This is recoverable quarantine rather than
+an assertion that filesystem/process checks provide a global write lock.
 
-Dirty variants idle for more than 7 days appear by size with checkboxes and a
-manual-only bulk **Snapshot and reclaim** action. Each selected checkout must
-pass identity, process, operation/index-flag and full-checkout 24-hour checks.
-The cache-only recency exception does not apply to snapshot reclamation.
-An alternate Git index captures tracked changes, non-ignored additions, deletions,
-renames and binaries into a commit under `refs/falcondeck/snapshots/<slug>` in the
-shared Git directory. The real index and branch are untouched. The commit pins
-HEAD and any previous snapshot, so unpublished branch history is retained locally;
-this explicit action does not require remote publication. Submodules and
-non-UTF-8 paths are retained for manual review.
+### Manual snapshots and Storage
 
-The daemon verifies the snapshot tree and materialized paths against a fresh
-capture, then repeats verification at the shared reclamation boundary. A changed
-working tree aborts removal. Only this verified manual path authorizes force
-removal; scheduled/ordinary reclamation retains Git's cleanliness safeguard.
-Snapshot metadata and sparse recipe survive checkout removal. Restore applies the
-snapshot in private staging, verifies it, and restores the branch index so saved
-working changes return unstaged. A verified marker distinguishes intentional
-all-file deletions from an incomplete checkout; an ordinary restore marker cannot
-excuse a later checkout with all tracked files missing. Snapshot refs are retained;
-there is no automatic history pruning. Snapshot objects consume some space, and
-ignored non-regenerable data still blocks reclamation.
+Mac Settings → Storage shows categories/projects, largest variants, per-volume
+availability, quarantine sizes/phases/earliest purge, candidate artifacts and
+recent runs. APFS shared extents can be counted repeatedly by allocated-size
+measurements; estimates are not promises of physical recovery.
 
-Legacy full-to-sparse conversion is deferred: live conversion needs a separate
-transaction and rollback path; existing provisioning only safely applies sparse
-recipes before publishing a new checkout. The audit records the measured upper
-bound without converting any existing checkout.
+Dirty variants idle over **seven days** have checkboxes and a manual-only action.
+A one-click eligible action displays count and size and still asks for explicit
+confirmation. Tracked deletions limited to `public/vendor` and
+`resources/views/vendor` appear in their own dirty group. They are never treated
+as clean or automatically reclaimed. Running tasks can only be opened. Safe cache
+cleanup is available separately; clean rows offer reclamation.
 
-Local endpoints: `GET /api/storage`, `GET/PATCH /api/storage/preferences`,
-`POST /api/storage/cleanup` (`confirmed: true`), and `POST /api/storage/variant`
-(`workspace_id`, `thread_id`, `action: clear_caches|reclaim|snapshot_reclaim`,
-`confirmed: true`). `POST /api/storage/snapshots` accepts `confirmed: true` and
-1–100 explicit `{workspace_id, thread_id}` targets; results are logged per target.
-`GET /api/health` adds nullable `free_bytes`, measured by statvfs without a disk
-inventory; bots can check it cheaply. These are local daemon APIs, not new relay,
-pairing or device operations.
+Snapshot creation uses an alternate index and does not move the branch or modify
+the real index. The snapshot commit pins HEAD, prior snapshots and a separate
+**original index tree** commit. Thus staged version A and working version B both
+remain reachable and restore independently. It includes tracked/untracked
+non-ignored files, deletions, renames and binaries. Ignored unique/private data
+is never silently discarded. Lossy filters, submodules and unsupported paths
+are refused. Restore verifies the working tree and saved index before publishing;
+sparse omissions and outside-recipe additions are retained. Failed verification
+removes nothing from the original checkout.
 
-### Safety checks shared with scripts/worktree-gc.mjs
+Local APIs: `GET /api/storage`, `GET/PATCH /api/storage/preferences`,
+`POST /api/storage/cleanup`, `POST /api/storage/variant`, and confirmed
+`POST /api/storage/snapshots` (1–100 explicit targets per request; the desktop
+batches larger confirmed selections and retains completed batch results). `GET /api/health` returns
+legacy nullable `free_bytes` for the data volume and a `volumes` list with device
+identity, representative path and nullable free bytes. Health uses stat calls,
+not checkout scans or Git subprocesses. Bounded project-pointer reads retain
+volume discovery after workspace deletion. Per-volume warnings and Storage use
+the same attribution.
+No relay, pairing or device operation is added.
 
-1. The checkout must still be attached to its recorded variant branch. A
-   different branch or detached HEAD is retained. Manual snapshots use the
-   explicit recovery refs documented above. The script also refuses detached worktrees and mismatched owner
-   branches.
-2. Tracked and untracked changes block. Ignored and untracked env copies pass
-   only when byte-identical to the project's originals.
-3. Present files with lowercase or `S` tags from `git ls-files -v` block, covering
-   assume-unchanged and manual skip-worktree edits. Sparse's absent skipped
-   files remain safe. Rebase, merge, cherry-pick, revert, bisect, and sequencer
-   state all block removal.
-4. Every commit must be reachable from live origin branches or patch-equivalent
-   on the default/same-named branch. Remote failures retain the checkout.
-   Verification borrows Git objects into temporary storage without updating
-   refs, FETCH_HEAD, the inspected index, or Git configuration.
-5. Ignored files must be regenerable. Root `vendor`, `target`, and `dist`, plus
-   `frontend/dist`, are anchored: `reports/dist/q3-final-analysis.md` is work,
-   not build output. `node_modules`, `.next`, `.phpunit.cache`, `.react-router`,
-   `__pycache__` and `.pytest_cache` remain recognized cache directories.
-   `bootstrap/cache`, `storage/framework/cache` and `storage/framework/views`
-   are anchored at the root. Collapsed ignored parents are inspected, so
-   sessions, logs, uploads, and unknown files still block removal.
-6. One full `lsof -nP -Fpn` inventory checks accessible cwd **and open file**
-   paths; `tail -f` from `/` still protects its input inside the checkout.
-   No recursive lsof scan or broad home-directory scan is used. A failed
-   inventory blocks cleanup. A zero exit **does not prove all processes were
-   visible**: permissions can hide another user's descriptors. This daemon
-   does not elevate privileges to inspect them.
-7. Running Docker bind mounts are checked when a known local socket is
-   available (DOCKER_HOST unix socket or /var/run/docker.sock). An unavailable
-   inventory in that case blocks removal. Remote/custom contexts without that
-   local socket signal, other container runtimes, and hidden descriptors remain
-   blind spots; do not infer a global inactivity guarantee from these checks.
-8. Under the thread gate, repeat local state, HEAD/branch, operation/index flags,
-   process checks, and thread eligibility immediately before removal. Use
-   `git worktree remove` without force and retain branches. The script rereads
-   owner state at this boundary too. An unrelated external writer can still
-   race a filesystem check; Git performs its own final cleanliness check.
+### Standalone GC tool
 
-The script additionally defaults to three days of age and skips open owners
-unless `--include-open-threads` is explicit. Default operation is dry-run:
-
-```sh
-node scripts/worktree-gc.mjs --format markdown
-node scripts/worktree-gc.mjs --apply  # human decision, never run automatically
-```
-
-The optional generated preset remains a broader manual policy, not the daemon's
-allowlist. Apply rechecks safety and records an audit log under
-`~/.falcondeck/worktree-gc/`.
-
-Archiving does try to free folders. Running daemon logs on 5 Nov confirmed
-Quizgecko removals at 14:17Z and 15:17Z. A read-only inspection found 43 archived
-Quizgecko variant threads: five retained folders and 38 absent paths. Absence
-alone does not establish whether archival or another cleanup removed a folder.
+`scripts/worktree-gc.mjs` remains a separate legacy manual policy. It still
+requires remote publication and uses its own cache presets/age rules; do not
+infer the daemon's new quarantine and cache-content guarantees from its output.
+The daemon never calls its apply mode. This branch does not change Quizgecko
+scripts or run any GC apply command.
 
 ## Storage measurements and warning
 
@@ -338,11 +312,13 @@ Use available bytes/statvfs for physical changes; du counts cloned extents in
 full.
 
 Before isolated creation/admission and every five minutes, measure free space
-on the daemon data volume. Below **30 GiB**, Mac shows a toast with a “Free up
+on each filesystem containing daemon data or a retained variant. Checks deduplicate
+by filesystem identity and attribute the representative path. Below **30 GiB**,
+Mac shows a toast with a “Free up
 space” action opening Storage. At **15 GiB or above** the persistent critical
 banner clears; below **15 GiB** the banner stays and the Mac attempts at most
 one system notification per local calendar day, with a persisted daily claim.
-The daemon's notification centre deduplicates critical notices per UTC day;
+The daemon's notification centre deduplicates critical notices per volume/UTC day;
 StoragePressure owns native Mac delivery to avoid double alerts. Storage warnings
 have their own off switch. At 30 GiB or above the low crossing rearms. Unknown
 measurements do not invent a zero-byte reading or clear the last known banner.
@@ -356,3 +332,15 @@ vanishes with `No such object` is skipped; other inventory failures still keep
 the checkout. GC dry runs validate the same restore recipe as apply. JSON
 reports omit internal index/status snapshots, which remain in memory for final
 removal checks.
+
+### External volumes
+
+Free-space reporting is per filesystem, including variants mounted under a
+separate drive. The creation root is still fixed at `$HOME/.falcondeck/variants`;
+this branch adds no relocation setting and retains symlink roots for review.
+Snapshots and their index/metadata live in the project's shared Git directory,
+which can remain on the startup volume. An external checkout does not move
+Codex databases or guarantee startup-volume headroom. Dependency clonefile across
+filesystems falls back to a cold install notice. Future relocation also needs
+explicit unavailable-drive/mount identity handling rather than treating an
+unplugged path as an ordinary reclaimed checkout.

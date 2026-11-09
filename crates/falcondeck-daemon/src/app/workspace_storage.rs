@@ -9,37 +9,6 @@ use std::{
 
 const DAY: i64 = 86400;
 const GIB: u64 = 1024 * 1024 * 1024;
-const CACHE_NAMES: &[&str] = &[
-    "node_modules",
-    ".cache",
-    ".cxx",
-    ".gradle",
-    "Pods",
-    ".parcel-cache",
-    ".svelte-kit",
-    "build",
-    "DerivedData",
-    ".next",
-    ".nuxt",
-    ".turbo",
-    ".pytest_cache",
-    "__pycache__",
-    ".phpunit.cache",
-    ".react-router",
-];
-const CACHE_PATHS: &[&str] = &[
-    "target",
-    "dist",
-    "build",
-    "vendor",
-    ".venv",
-    "frontend/dist",
-    "frontend/build",
-    "ios/build",
-    "android/build",
-    "android/app/build",
-];
-
 #[derive(Default)]
 struct Facts {
     bytes: u64,
@@ -81,11 +50,9 @@ fn scan(path: &Path, custom: &[String]) -> std::io::Result<Facts> {
         if m.is_dir() && !m.file_type().is_symlink() {
             let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy();
             let cache = !in_cache
-                && (p
-                    .file_name()
-                    .is_some_and(|n| CACHE_NAMES.iter().any(|s| n == *s))
-                    || CACHE_PATHS.contains(&rel.as_ref())
-                    || custom.iter().any(|s| s == &rel));
+                && crate::variant::cache::known_location(&rel)
+                && (custom.is_empty() || custom.iter().any(|s| s == &rel))
+                && crate::variant::cache::validate(root, &rel).is_ok();
             for e in std::fs::read_dir(p)? {
                 let child = match walk(root, &e?.path(), custom, in_cache || cache, seen) {
                     Ok(f) => f,
@@ -123,32 +90,6 @@ async fn facts(path: PathBuf, custom: Vec<String>) -> Result<Facts, DaemonError>
         .map_err(|e| DaemonError::Rpc(e.to_string()))?
         .map_err(|e| DaemonError::Rpc(e.to_string()))
 }
-async fn remove_background(path: PathBuf) -> Result<(), DaemonError> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        unsafe {
-            unsafe extern "C" {
-                fn pthread_set_qos_class_self_np(class: u32, priority: i32) -> i32;
-            }
-            pthread_set_qos_class_self_np(0x09, 0);
-        }
-        let result = std::fs::symlink_metadata(&path).and_then(|m| {
-            if m.file_type().is_symlink() {
-                return Err(std::io::Error::other("Symlink retained"));
-            }
-            if m.is_dir() {
-                std::fs::remove_dir_all(path)
-            } else {
-                std::fs::remove_file(path)
-            }
-        });
-        let _ = tx.send(result);
-    });
-    rx.await
-        .map_err(|e| DaemonError::Rpc(e.to_string()))?
-        .map_err(DaemonError::Io)
-}
 async fn git(path: &str, args: &[&str]) -> Result<String, DaemonError> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -182,11 +123,21 @@ fn quiet(t: &ManagedThread) -> bool {
         && t.queued_requests.is_empty()
         && t.dispatching_request.is_none()
 }
+fn vendor_deletions_only(status: &str) -> bool {
+    let entries = status
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    !entries.is_empty()
+        && entries.iter().all(|s| {
+            s.starts_with(" D public/vendor/") || s.starts_with(" D resources/views/vendor/")
+        })
+}
 fn due(idle_age: i64, archived: bool, newest: i64, now: i64, action: StorageAction) -> bool {
     now.saturating_sub(newest) > DAY
         && match action {
             StorageAction::ClearCaches => idle_age > 3 * DAY,
-            StorageAction::Reclaim => archived || idle_age > 14 * DAY,
+            StorageAction::Reclaim => archived || idle_age > DAY,
             StorageAction::SnapshotReclaim => idle_age > 7 * DAY,
         }
 }
@@ -220,6 +171,60 @@ impl AppState {
             .parent()
             .unwrap_or(Path::new("."))
             .to_path_buf()
+    }
+    /// Cheap stat-only health inventory; never walks checkout contents.
+    pub(super) async fn storage_volumes(&self) -> Vec<StorageVolume> {
+        let root = self.storage_root();
+        let mut paths = vec![root.clone()];
+        let projects={
+            let ws=self.inner.workspaces.lock().await;
+            paths.extend(ws.values().flat_map(|w|w.threads.values().filter_map(|t|t.summary.variant.as_ref().map(|v|PathBuf::from(&v.path)))));
+            ws.values().map(|w|PathBuf::from(&w.summary.path)).collect::<Vec<_>>()
+        };
+        for project in projects {
+            paths.push(project.clone());
+            match crate::variant::git_storage_paths(&project).await {
+                Ok(git)=>paths.extend(git),
+                Err(_)=>paths.push(project.join(".git")),
+            }
+        }
+        // Retained siblings remain managed after their last workspace is deleted.
+        // Registry reads are bounded metadata; health never spawns Git or hashes files.
+        match crate::variant::quarantine::retained_volume_paths(&root.join("variants")).await {
+            Ok(retained) => paths.extend(retained),
+            Err(error) => tracing::warn!(%error, "retained storage volumes could not be read"),
+        }
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        for mut path in paths {
+            // Reclaimed paths may be absent; their existing managed parent still
+            // identifies the correct volume. Never guess across an absent SSD root.
+            if !path.exists() && path.starts_with(&root) && path != root {
+                // An existing immediate parent identifies a reclaimed checkout's
+                // volume. A missing mount/project parent stays explicitly unknown.
+                if let Some(parent) = path.parent().filter(|p| p.exists()) {
+                    path = parent.to_owned();
+                }
+            }
+            use std::os::unix::fs::MetadataExt;
+            let device = tokio::fs::metadata(&path).await.ok().map(|m| m.dev());
+            let id = device
+                .map(|d| format!("device-{d:x}"))
+                .unwrap_or_else(|| format!("unavailable:{}", path.display()));
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            result.push(StorageVolume {
+                id,
+                path: path.to_string_lossy().into_owned(),
+                free_bytes: if device.is_some() {
+                    crate::variant::available_disk(&path).await
+                } else {
+                    None
+                },
+            });
+        }
+        result
     }
     async fn storage_json<T: serde::de::DeserializeOwned + Default>(
         &self,
@@ -600,6 +605,14 @@ impl AppState {
             };
             *projects.entry(project.clone()).or_insert(0) += f.bytes;
             caches += cache_bytes;
+            let vendor_deletions_only = vendor_deletions_only(
+                &git(
+                    &v.path,
+                    &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                )
+                .await
+                .unwrap_or_default(),
+            );
             variants.push(StorageVariant {
                 workspace_id: wid,
                 thread_id: tid,
@@ -621,8 +634,42 @@ impl AppState {
                 blocked,
                 cache_blocked,
                 snapshot_blocked,
+                vendor_deletions_only,
             });
         }
+        let mut quarantines = Vec::new();
+        let mut project_paths = {
+            let ws = self.inner.workspaces.lock().await;
+            ws.values()
+                .map(|w| w.summary.path.clone())
+                .collect::<HashSet<_>>()
+        };
+        project_paths.extend(crate::variant::quarantine::registered_projects(&root.join("variants")).await?);
+        for project in project_paths {
+            let Ok(records) = crate::variant::quarantine::records(&project).await else {
+                continue;
+            };
+            for r in records {
+                let path = r.residue.as_ref().filter(|p| p.exists()).unwrap_or(&r.path);
+                if !path.exists() {
+                    continue;
+                }
+                let f = facts(path.clone(), Vec::new()).await?;
+                *projects.entry(project.clone()).or_insert(0) += f.bytes;
+                quarantines.push(StorageQuarantine {
+                    project: project.clone(),
+                    original: r.original.to_string_lossy().into_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    bytes: f.bytes,
+                    release_after: r.created_at + crate::variant::quarantine::GRACE_SECONDS,
+                    phase: r.phase,
+                });
+            }
+        }
+        categories.insert(
+            "quarantined".into(),
+            quarantines.iter().map(|q| q.bytes).sum(),
+        );
         variants.sort_by_key(|v| std::cmp::Reverse(v.bytes));
         categories.insert("variant_caches".into(), caches);
         categories.insert(
@@ -636,10 +683,12 @@ impl AppState {
         Ok(StorageReport {
             generated_at: now,
             free_bytes: crate::variant::available_disk(&root).await,
+            volumes: self.storage_volumes().await,
             categories,
             projects,
             variants,
             candidates,
+            quarantines,
             preferences: self.storage_preferences().await?,
             runs: self.storage_json("storage-runs.json").await?,
         })
@@ -911,10 +960,111 @@ impl AppState {
             crate::variant::process_clear(Path::new(&v.path))
                 .await
                 .map_err(DaemonError::Rpc)?;
-            remove_background(p).await?;
+            crate::variant::cache::validate(Path::new(&v.path), &rel).map_err(DaemonError::Rpc)?;
+            crate::variant::quarantine::stage(&project, &v, &p, None).await?;
             cleared += 1;
         }
-        Ok(format!("Cleared {cleared} cache directories"))
+        Ok(format!(
+            "Quarantined {cleared} cache directories; removal after the 24-hour recovery period"
+        ))
+    }
+    async fn storage_purge_quarantines(
+        &self,
+        run: &mut StorageRun,
+        preferences: &StoragePreferences,
+    ) {
+        let mut workspaces = {
+            let ws = self.inner.workspaces.lock().await;
+            ws.values()
+                .map(|w| w.summary.path.clone())
+                .collect::<HashSet<_>>()
+        };
+        match crate::variant::quarantine::registered_projects(&self.storage_root().join("variants")).await {
+            Ok(projects) => workspaces.extend(projects),
+            Err(e) => run.entries.push(format!("Quarantine project inventory: {e}")),
+        }
+        for project in workspaces {
+            if self.is_shutting_down() {
+                break;
+            }
+            let records = match crate::variant::quarantine::records(&project).await {
+                Ok(r) => r,
+                Err(e) => {
+                    run.entries.push(format!("Quarantine inventory: {e}"));
+                    continue;
+                }
+            };
+            for r in records {
+                if (r.snapshot.is_some() && !preferences.reclaim_checkouts)
+                    || (r.snapshot.is_none() && !preferences.clear_caches)
+                {
+                    continue;
+                }
+                // Roots, project identity, and managed admissions remain protected
+                // even though the original checkout path is now intentionally absent.
+                let root = self.storage_root().join("variants");
+                if !Path::new(&r.variant.path).starts_with(&root) {
+                    continue;
+                }
+                let owner = {
+                    let ws = self.inner.workspaces.lock().await;
+                    ws.iter().find_map(|(wid, w)| {
+                        w.threads.iter().find_map(|(tid, t)| {
+                            t.summary
+                                .variant
+                                .as_ref()
+                                .filter(|v| v.path == r.variant.path)
+                                .map(|_| (wid.clone(), tid.clone(), quiet(t)))
+                        })
+                    })
+                };
+                if owner.as_ref().is_some_and(|(_, _, quiet)| !*quiet) {
+                    continue;
+                }
+                let gate = if let Some((wid, tid, _)) = owner {
+                    Some(self.variant_gate(&wid, &tid).await)
+                } else {
+                    None
+                };
+                let _held = if let Some(g) = gate.as_ref() {
+                    Some(g.lock().await)
+                } else {
+                    None
+                };
+                let quiet_now = {
+                    let ws = self.inner.workspaces.lock().await;
+                    let owners = ws
+                        .values()
+                        .flat_map(|w| w.threads.values())
+                        .filter(|t| {
+                            t.summary
+                                .variant
+                                .as_ref()
+                                .is_some_and(|v| v.path == r.variant.path)
+                        })
+                        .collect::<Vec<_>>();
+                    owners.len() <= 1
+                        && owners.iter().all(|t| {
+                            t.summary.variant.as_ref() == Some(&r.variant)
+                                && quiet(t)
+                                && Utc::now()
+                                    .timestamp()
+                                    .saturating_sub(t.summary.updated_at.timestamp())
+                                    > if r.snapshot.is_some() { DAY } else { 3 * DAY }
+                        })
+                };
+                if !quiet_now {
+                    continue;
+                }
+                let result = crate::variant::quarantine::purge(&r, Utc::now().timestamp()).await;
+                match result {
+                    Ok(None) => {}
+                    other => run
+                        .entries
+                        .push(format!("Quarantine {}: {other:?}", r.path.display())),
+                }
+            }
+        }
     }
     pub(super) async fn save_storage_run(&self, run: &StorageRun) -> Result<(), DaemonError> {
         let mut runs: Vec<StorageRun> = self.storage_json("storage-runs.json").await?;
@@ -969,6 +1119,7 @@ impl AppState {
             ..StorageRun::default()
         };
         self.save_storage_run(&run).await?;
+        self.storage_purge_quarantines(&mut run, &p).await;
         let report = match self.storage_inventory().await {
             Ok(r) => r,
             Err(e) => {
@@ -985,7 +1136,7 @@ impl AppState {
             let action = if v.status == "clean"
                 && v.blocked.is_none()
                 && p.reclaim_checkouts
-                && (v.archived || v.idle_days >= 14)
+                && (v.archived || v.idle_days >= 1)
             {
                 Some(StorageAction::Reclaim)
             } else if p.clear_caches && v.cache_blocked.is_none() && v.idle_days >= 3 {
@@ -1028,67 +1179,6 @@ impl AppState {
                 self.save_storage_run(&run).await?;
                 tokio::task::yield_now().await;
             }
-        }
-        for c in report.candidates {
-            if c.blocked.is_some()
-                || !match c.category.as_str() {
-                    "artifacts" => p.delete_old_artifacts,
-                    "experiments" => p.delete_old_experiments,
-                    _ => false,
-                }
-            {
-                continue;
-            }
-            let path = PathBuf::from(&c.path);
-            let parent = self.storage_root().join(&c.category);
-            let safe = path.parent() == Some(parent.as_path())
-                && (path.is_dir() || path.is_file())
-                && !std::fs::symlink_metadata(&path)
-                    .map_err(|e| DaemonError::Rpc(e.to_string()))?
-                    .file_type()
-                    .is_symlink();
-            if !safe
-                || std::fs::symlink_metadata(&parent)?.file_type().is_symlink()
-                || std::fs::canonicalize(&parent)?
-                    != std::fs::canonicalize(self.storage_root())?.join(&c.category)
-            {
-                continue;
-            }
-            let f = facts(path.clone(), Vec::new()).await?;
-            let ws = self.inner.workspaces.lock().await;
-            let protected = ws.values().any(|w| {
-                Path::new(&w.summary.path).starts_with(&path)
-                    || (Path::new(&w.summary.path).join(".git").exists()
-                        && path.starts_with(&w.summary.path))
-                    || w.threads.values().any(|t| {
-                        t.summary.variant.as_ref().is_some_and(|v| {
-                            Path::new(&v.path).starts_with(&path) || path.starts_with(&v.path)
-                        })
-                    })
-            });
-            drop(ws);
-            if protected {
-                continue;
-            }
-            if f.contains_git
-                || Utc::now().timestamp().saturating_sub(f.newest) <= 30 * DAY
-                || crate::variant::process_clear(&path).await.is_err()
-            {
-                continue;
-            }
-            // Process inventory may take time; repeat age immediately before removal.
-            if Utc::now()
-                .timestamp()
-                .saturating_sub(facts(path.clone(), Vec::new()).await?.newest)
-                <= 30 * DAY
-            {
-                continue;
-            }
-            let result = remove_background(path.clone()).await;
-            if run.entries.len() < 200 {
-                run.entries.push(format!("{}: {result:?}", path.display()));
-            }
-            self.save_storage_run(&run).await?;
         }
         run.finished_at = Some(Utc::now().timestamp());
         self.save_storage_run(&run).await?;
@@ -1168,15 +1258,9 @@ mod tests {
             now,
             StorageAction::ClearCaches
         ));
-        assert!(!due(
-            14 * DAY,
-            false,
-            now - 2 * DAY,
-            now,
-            StorageAction::Reclaim
-        ));
+        assert!(!due(DAY, false, now - 2 * DAY, now, StorageAction::Reclaim));
         assert!(due(
-            14 * DAY + 1,
+            DAY + 1,
             false,
             now - 2 * DAY,
             now,
@@ -1197,6 +1281,68 @@ mod tests {
         assert_eq!(disk_level(30 * GIB - 1), "low");
         assert_eq!(disk_level(15 * GIB), "low");
         assert_eq!(disk_level(15 * GIB - 1), "critical");
+    }
+    #[test]
+    fn vendor_deletions_remain_dirty_and_have_a_precise_group() {
+        assert!(vendor_deletions_only(
+            " D public/vendor/a.js\0 D resources/views/vendor/x.blade.php\0"
+        ));
+        for status in [
+            "",
+            "D  public/vendor/a.js\0",
+            " D public/vendor/a.js\0 M authored.rs\0",
+            " D vendor/a.js\0",
+        ] {
+            assert!(!vendor_deletions_only(status), "{status}");
+        }
+    }
+    #[tokio::test]
+    async fn health_volumes_deduplicate_the_data_filesystem_and_keep_unknown_paths_explicit() {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            root.path().join("state.json"),
+        );
+        let volumes = app.storage_volumes().await;
+        assert_eq!(volumes.len(), 1);
+        assert!(volumes[0].id.starts_with("device-"));
+        assert!(volumes[0].free_bytes.is_some());
+    }
+    #[tokio::test]
+    async fn health_keeps_registered_recovery_volume_without_any_workspace() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path("test".into(),HashMap::new(),root.path().join("state.json"));
+        let group = root.path().join("variants/project");
+        std::fs::create_dir_all(&group).unwrap();
+        // The dev filesystem supplies a distinct, read-only capacity observation;
+        // every metadata write remains inside this fixture.
+        let project = "/dev";
+        let name = format!(".storage-quarantine-project-{:x}.json",Sha256::digest(project.as_bytes()));
+        std::fs::write(group.join(name),serde_json::to_vec(project).unwrap()).unwrap();
+        assert!(app.inner.workspaces.lock().await.is_empty());
+        let volumes = app.storage_volumes().await;
+        let id = format!("device-{:x}",std::fs::metadata(project).unwrap().dev());
+        assert!(volumes.iter().any(|v|v.id == id && v.free_bytes.is_some()));
+        assert!(volumes.iter().any(|v|v.path == "/dev/.git" && v.free_bytes.is_none()));
+    }
+    #[tokio::test]
+    async fn health_reports_gitfile_and_cached_shared_git_volume_without_a_workspace() {
+        use sha2::{Digest,Sha256};use std::os::unix::fs::MetadataExt;
+        let root=tempfile::tempdir().unwrap();let project=root.path().join("project");std::fs::create_dir(&project).unwrap();
+        let app=AppState::new_with_state_path("test".into(),HashMap::new(),root.path().join("state.json"));
+        let group=root.path().join("variants/project");std::fs::create_dir_all(&group).unwrap();
+        let name=format!(".storage-quarantine-project-{:x}.json",Sha256::digest(project.to_string_lossy().as_bytes()));
+        let registry=group.join(name);
+        std::fs::write(&registry,serde_json::to_vec(&project).unwrap()).unwrap();
+        std::fs::write(project.join(".git"),"gitdir: /dev\n").unwrap();
+        let id=format!("device-{:x}",std::fs::metadata("/dev").unwrap().dev());
+        assert!(app.storage_volumes().await.iter().any(|v|v.id==id && v.free_bytes.is_some()));
+        std::fs::remove_file(project.join(".git")).unwrap();
+        std::fs::write(registry,serde_json::to_vec(&serde_json::json!({"project":project,"git_paths":["/dev"]})).unwrap()).unwrap();
+        assert!(app.storage_volumes().await.iter().any(|v|v.id==id && v.free_bytes.is_some()));
     }
     #[test]
     fn custom_cache_paths_cannot_escape_or_target_git() {

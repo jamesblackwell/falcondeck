@@ -1,4 +1,4 @@
-//! Manual dirty-checkout snapshots. Branch refs and the real index are never written.
+//! Snapshot creation preserves branch/index; restore recovers both index and working state.
 use super::run_git;
 use crate::error::DaemonError;
 use serde::{Deserialize, Serialize};
@@ -9,10 +9,16 @@ use tokio::{fs, process::Command};
 pub(crate) struct Snapshot {
     pub oid: String,
     pub tree: String,
+    #[serde(default)]
+    pub index_tree: String,
+    #[serde(default)]
+    pub skip_worktree: Vec<String>,
     pub head: String,
     pub reference: String,
     pub materialized: Vec<String>,
     pub pending: bool,
+    #[serde(default)]
+    pub clean: bool,
 }
 async fn common(path: &str) -> Result<PathBuf, DaemonError> {
     Ok(PathBuf::from(
@@ -66,7 +72,9 @@ async fn command(path: &str, args: &[&str], index: Option<&Path>) -> Result<Stri
     String::from_utf8(out.stdout)
         .map_err(|_| DaemonError::Rpc("Snapshot requires UTF-8 paths; checkout retained".into()))
 }
-async fn capture_tree(path: &str) -> Result<(String, Vec<String>), DaemonError> {
+async fn capture_tree(
+    path: &str,
+) -> Result<(String, Vec<String>, String, Vec<String>), DaemonError> {
     let tracked = command(path, &["ls-files", "--stage", "-z"], None).await?;
     if tracked.split('\0').any(|s| s.starts_with("160000 ")) {
         return Err(DaemonError::Rpc(
@@ -86,10 +94,19 @@ async fn capture_tree(path: &str) -> Result<(String, Vec<String>), DaemonError> 
     let index = dir.join("index");
     let result = async {
         fs::copy(index_path.trim(), &index).await?;
+        let index_tree = command(path, &["write-tree"], Some(&index))
+            .await?
+            .trim()
+            .to_owned();
         // Add explicit paths only: absent sparse entries remain in the copied
         // index, while ordinary tracked deletions and outside-recipe additions
         // are captured. NUL pathspecs preserve names containing whitespace.
         let entries = command(path, &["ls-files", "-v", "-z"], None).await?;
+        let skip_worktree = entries
+            .split('\0')
+            .filter(|s| s.starts_with("S ") || s.starts_with("s "))
+            .map(|s| s[2..].to_owned())
+            .collect::<Vec<_>>();
         let mut paths = std::collections::BTreeSet::new();
         for entry in entries.split('\0').filter(|s| !s.is_empty()) {
             let name = &entry[2..];
@@ -193,7 +210,7 @@ async fn capture_tree(path: &str) -> Result<(String, Vec<String>), DaemonError> 
             }
         }
         materialized.sort();
-        Ok::<_, DaemonError>((tree, materialized))
+        Ok::<_, DaemonError>((tree, materialized, index_tree, skip_worktree))
     }
     .await;
     let _ = fs::remove_dir_all(dir).await;
@@ -216,7 +233,28 @@ pub(crate) async fn create(path: &str, slug: &str) -> Result<Snapshot, DaemonErr
         .await?
         .trim()
         .to_string();
-    let (tree, materialized) = capture_tree(path).await?;
+    let (tree, materialized, index_tree, skip_worktree) = capture_tree(path).await?;
+    // A separate parent makes staged-only blobs reachable even when the working
+    // copy has a different version. Neither original branch nor index is changed.
+    let index_commit = command(
+        path,
+        &[
+            "-c",
+            "user.name=FalconDeck",
+            "-c",
+            "user.email=snapshots@falcondeck.local",
+            "commit-tree",
+            &index_tree,
+            "-p",
+            &head,
+            "-m",
+            "FalconDeck saved index",
+        ],
+        None,
+    )
+    .await?
+    .trim()
+    .to_owned();
     let reference = format!("refs/falcondeck/snapshots/{slug}");
     let old = command(path, &["rev-parse", "--verify", &reference], None)
         .await
@@ -232,6 +270,7 @@ pub(crate) async fn create(path: &str, slug: &str) -> Result<Snapshot, DaemonErr
         "-p",
         &head,
     ];
+    args.extend(["-p", &index_commit]);
     if let Some(old) = old.as_ref().filter(|s| *s != &head) {
         args.extend(["-p", old]);
     }
@@ -252,10 +291,19 @@ pub(crate) async fn create(path: &str, slug: &str) -> Result<Snapshot, DaemonErr
     let snapshot = Snapshot {
         oid,
         tree,
+        index_tree,
+        skip_worktree,
         head,
         reference,
         materialized,
         pending: true,
+        clean: command(
+            path,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+            None,
+        )
+        .await?
+        .is_empty(),
     };
     verify(path, &snapshot).await?;
     Ok(snapshot)
@@ -271,8 +319,61 @@ pub(crate) async fn verify(path: &str, snapshot: &Snapshot) -> Result<(), Daemon
             "Snapshot identity changed; checkout retained".into(),
         ));
     }
-    let (tree, files) = capture_tree(path).await?;
-    if tree != snapshot.tree || files != snapshot.materialized {
+    verify_contents(path, snapshot).await
+}
+/// Old quarantines remain recoverable when newer snapshot refs pin them as
+/// ancestors. Their local branch may have advanced in a restored checkout.
+pub(crate) async fn verify_recoverable(path: &str, snapshot: &Snapshot) -> Result<(), DaemonError> {
+    command(
+        path,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &snapshot.oid,
+            &snapshot.reference,
+        ],
+        None,
+    )
+    .await?;
+    verify_contents(path, snapshot).await
+}
+async fn verify_contents(path: &str, snapshot: &Snapshot) -> Result<(), DaemonError> {
+    if command(
+        path,
+        &["rev-parse", &format!("{}^{{tree}}", snapshot.oid)],
+        None,
+    )
+    .await?
+    .trim()
+        != snapshot.tree
+        || command(path, &["rev-parse", &format!("{}^1", snapshot.oid)], None)
+            .await?
+            .trim()
+            != snapshot.head
+    {
+        return Err(DaemonError::Rpc(
+            "Snapshot components are inconsistent".into(),
+        ));
+    }
+    if !snapshot.index_tree.is_empty()
+        && command(
+            path,
+            &["rev-parse", &format!("{}^2^{{tree}}", snapshot.oid)],
+            None,
+        )
+        .await?
+        .trim()
+            != snapshot.index_tree
+    {
+        return Err(DaemonError::Rpc(
+            "Snapshot index component is missing or inconsistent".into(),
+        ));
+    }
+    let (tree, files, index_tree, _) = capture_tree(path).await?;
+    if tree != snapshot.tree
+        || (!snapshot.clean && files != snapshot.materialized)
+        || (!snapshot.index_tree.is_empty() && index_tree != snapshot.index_tree)
+    {
         return Err(DaemonError::Rpc(
             "Snapshot verification failed: working tree changed; nothing removed".into(),
         ));
@@ -281,11 +382,7 @@ pub(crate) async fn verify(path: &str, snapshot: &Snapshot) -> Result<(), Daemon
 }
 async fn write(project: &str, slug: &str, snapshot: &Snapshot) -> Result<(), DaemonError> {
     let path = metadata_path(project, slug).await?;
-    fs::create_dir_all(path.parent().unwrap()).await?;
-    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(&temp, serde_json::to_vec(snapshot)?).await?;
-    fs::rename(temp, path).await?;
-    Ok(())
+    super::quarantine::durable_write(&path, serde_json::to_vec(snapshot)?).await
 }
 pub(crate) async fn load(project: &str, slug: &str) -> Result<Option<Snapshot>, DaemonError> {
     match fs::read(metadata_path(project, slug).await?).await {
@@ -352,7 +449,11 @@ pub(crate) async fn apply_pending(
     command(path, &["read-tree", "--reset", "-u", &snapshot.oid], None).await?;
     // Explicit materialization retains non-ignored additions outside a sparse
     // recipe without materializing the recipe's unchanged excluded data.
-    for chunk in snapshot.materialized.chunks(100) {
+    for chunk in snapshot
+        .materialized
+        .chunks(100)
+        .filter(|_| !snapshot.clean)
+    {
         let mut args = vec![
             "checkout-index",
             "--force",
@@ -362,12 +463,22 @@ pub(crate) async fn apply_pending(
         args.extend(chunk.iter().map(String::as_str));
         command(path, &args, None).await?;
     }
-    // Reuse the provisioned branch index byte-for-byte, including sparse
-    // skip-worktree bits. Saved changes return as working-tree changes.
-    let temp = PathBuf::from(baseline_index.trim())
-        .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(&temp, baseline).await?;
-    fs::rename(temp, baseline_index.trim()).await?;
+    if snapshot.index_tree.is_empty() {
+        // Compatibility with snapshots made before separate index preservation.
+        let temp = PathBuf::from(baseline_index.trim())
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        fs::write(&temp, baseline).await?;
+        fs::rename(temp, baseline_index.trim()).await?;
+    } else {
+        // Replace the index without updating working files: staged A and working
+        // B must return as two independent versions, including staged deletions.
+        command(path, &["read-tree", "--reset", &snapshot.index_tree], None).await?;
+        for chunk in snapshot.skip_worktree.chunks(100) {
+            let mut args = vec!["update-index", "--skip-worktree", "--"];
+            args.extend(chunk.iter().map(String::as_str));
+            command(path, &args, None).await?;
+        }
+    }
     verify(path, &snapshot).await?;
     fs::write(marker(path).await?, serde_json::to_vec(&snapshot)?).await?;
     Ok(true)
@@ -439,4 +550,15 @@ pub(crate) async fn approved_empty_checkout(path: &str) -> bool {
             && command(path, &["ls-files", "--stage"], None).await.is_ok();
     }
     false
+}
+
+pub(crate) async fn mark_restored(
+    project: &str,
+    slug: &str,
+    path: &str,
+    snapshot: &Snapshot,
+) -> Result<(), DaemonError> {
+    verify(path, snapshot).await?;
+    super::quarantine::durable_write(&marker(path).await?, serde_json::to_vec(snapshot)?).await?;
+    clear_pending(project, slug).await
 }

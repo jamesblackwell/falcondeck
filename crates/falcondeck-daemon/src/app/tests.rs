@@ -9713,7 +9713,8 @@ fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
 }
 
 async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..200 {
+    // Durable background work intentionally yields to foreground Mac activity.
+    for _ in 0..1200 {
         if condition() {
             return true;
         }
@@ -9722,8 +9723,8 @@ async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
     condition()
 }
 
-/// Archiving reclaims a variant that is clean and pushed, keeps one with
-/// unpushed work, and unarchiving brings a reclaimed copy back.
+/// Archiving quarantines clean local branches, including unpublished commits;
+/// unarchiving brings the checkout back and later activity remains protected.
 #[tokio::test]
 async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
     let temp = tempdir().unwrap();
@@ -9857,14 +9858,12 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
     let safe_path = std::path::PathBuf::from(&safe.path);
     assert!(
         wait_until(|| !safe_path.exists()).await,
-        "safe copy should be reclaimed"
+        "safe copy should be quarantined; cleanup log: {}",
+        std::fs::read_to_string(temp.path().join("storage-runs.json")).unwrap_or_default()
     );
-    // Give the second background task time to decide; it must keep the copy.
-    let kept = super::workspace_ops::reclaim_archived_variant(&app, &workspace_id, "thread-work")
-        .await
-        .unwrap();
-    assert!(matches!(kept, crate::variant::Reclaim::Kept(_)), "{kept:?}");
-    assert!(std::path::Path::new(&unpushed.path).exists());
+    let unpushed_path = std::path::PathBuf::from(&unpushed.path);
+    assert!(wait_until(|| !unpushed_path.exists()).await, "unpublished checkout should be quarantined; cleanup log: {}",std::fs::read_to_string(temp.path().join("storage-runs.json")).unwrap_or_default());
+    assert!(git_in(&project, &["branch", "--list", &unpushed.branch]).contains(&unpushed.branch));
     // The branch survives reclaiming.
     assert!(git_in(&project, &["branch", "--list", &safe.branch]).contains(&safe.branch));
 
@@ -9935,9 +9934,9 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
         matches!(
             app.reap_finished_variant(&workspace_id, "thread-work", completed, Utc::now())
                 .await,
-            Some(crate::variant::Reclaim::Kept(_))
+            Some(crate::variant::Reclaim::Removed)
         ),
-        "unpushed commits must keep checkout"
+        "the unpublished branch's checkout is already quarantined; its branch remains"
     );
     std::fs::write(safe_path.join("a.txt"), "dirty").unwrap();
     assert!(
@@ -9963,11 +9962,10 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
         matches!(result, Some(crate::variant::Reclaim::Kept(_))),
         "process must keep checkout"
     );
-    assert_eq!(
-        app.reap_finished_variant(&workspace_id, "thread-safe", completed, Utc::now())
-            .await,
-        Some(crate::variant::Reclaim::Removed)
-    );
+    assert!(matches!(
+        app.reap_finished_variant(&workspace_id, "thread-safe", completed, Utc::now()).await,
+        Some(crate::variant::Reclaim::Quarantined(_))
+    ));
     assert!(
         app.thread_summary(&workspace_id, "thread-safe")
             .await

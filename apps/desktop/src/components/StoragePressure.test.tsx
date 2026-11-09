@@ -28,3 +28,16 @@ it('limits native critical notifications across remounts and honours the off swi
   await act(async () => { render(<StoragePressure baseUrl="http://daemon" onToast={toast} onOpenStorage={open} />); });
   expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(sendDesktopAttentionNotification).toHaveBeenCalledTimes(1);
 });
+it('warns about a full external volume even when the data volume is healthy', async () => {
+  api.health.mockResolvedValue({ free_bytes: 80 * 2 ** 30, volumes: [
+    { id: 'internal', path: '/internal', free_bytes: 80 * 2 ** 30 },
+    { id: 'external', path: '/Volumes/SSD/variants', free_bytes: 2 * 2 ** 30 },
+  ] });
+  const toast=vi.fn();const props={baseUrl:'http://daemon',onToast:toast,onOpenStorage:vi.fn()};
+  const first=render(<StoragePressure {...props}/>);
+  expect(await screen.findByRole('alert')).toHaveTextContent('2.0 GiB available on /Volumes/SSD/variants');
+  expect(toast).toHaveBeenCalledTimes(1);
+  expect(toast.mock.calls[0][0].description).toContain('/Volumes/SSD/variants');
+  first.unmount();render(<StoragePressure {...props}/>);
+  await screen.findByRole('alert');expect(sendDesktopAttentionNotification).toHaveBeenCalledTimes(1);
+});

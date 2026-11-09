@@ -2394,6 +2394,9 @@ pub struct HealthResponse {
     /// Available bytes on the daemon data volume; unknown when measurement fails.
     #[serde(default)]
     pub free_bytes: Option<u64>,
+    /// Distinct filesystems containing daemon data or retained variants.
+    #[serde(default)]
+    pub volumes: Vec<storage::StorageVolume>,
     /// Whether the service considers itself healthy.
     pub ok: bool,
     /// Build or application version reported by the daemon.

@@ -10,11 +10,13 @@ pub struct StoragePreferences {
     pub scheduled: bool,
     /// Remove eligible ignored build caches after three idle days.
     pub clear_caches: bool,
-    /// Reclaim eligible archived or fourteen-day-idle checkouts, retaining branches.
+    /// Reclaim eligible archived or twenty-four-hour-idle checkouts, retaining branches.
     pub reclaim_checkouts: bool,
-    /// Opt in to deletion of eligible artifacts unmodified for thirty days.
+    /// Ignored legacy flag, accepted only to read old preferences. Never deletes artifacts.
+    #[serde(skip_serializing)]
     pub delete_old_artifacts: bool,
-    /// Opt in to deletion of eligible experiments unmodified for thirty days.
+    /// Ignored legacy flag, accepted only to read old preferences. Never deletes experiments.
+    #[serde(skip_serializing)]
     pub delete_old_experiments: bool,
     /// Enable low-disk warnings on this daemon.
     pub warnings: bool,
@@ -60,6 +62,9 @@ pub struct StorageVariant {
     pub cache_blocked: Option<String>,
     /// Manual snapshot refusal for a dirty checkout idle more than seven days.
     pub snapshot_blocked: Option<String>,
+    /// True only when all dirty status entries are unstaged tracked vendor deletions.
+    #[serde(default)]
+    pub vendor_deletions_only: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// An artifact or experiment with no changes in the last 30 days.
@@ -86,6 +91,32 @@ pub struct StorageRun {
     /// Bounded summaries of actions and safety refusals.
     pub entries: Vec<String>,
 }
+/// Retained bytes awaiting quarantine verification or manual recovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StorageQuarantine {
+    /// Main project owning the retained files.
+    pub project: String,
+    /// Original checkout or cache path.
+    pub original: String,
+    /// Current quarantine or preserved-residue path.
+    pub path: String,
+    /// Allocated retained bytes.
+    pub bytes: u64,
+    /// Earliest possible purge time; safeguards can retain it longer.
+    pub release_after: i64,
+    /// Durable transaction phase, including explicit recovery failures.
+    pub phase: String,
+}
+/// Availability of one filesystem containing daemon data or a retained checkout.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageVolume {
+    /// Filesystem device identity; unavailable paths have a path-scoped identity.
+    pub id: String,
+    /// Representative managed path on this volume, for warning attribution.
+    pub path: String,
+    /// Available bytes on this filesystem, or unknown when unavailable.
+    pub free_bytes: Option<u64>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// Local data-volume inventory; allocated sizes can count APFS shared extents twice.
 pub struct StorageReport {
@@ -93,6 +124,9 @@ pub struct StorageReport {
     pub generated_at: i64,
     /// Available bytes on the data volume, or unknown if measurement failed.
     pub free_bytes: Option<u64>,
+    /// Distinct filesystems containing daemon data or variants.
+    #[serde(default)]
+    pub volumes: Vec<StorageVolume>,
     /// Allocated category totals; cache/content subtotals are parts of variants.
     pub categories: BTreeMap<String, u64>,
     /// Allocated retained-variant totals keyed by main project path.
@@ -101,6 +135,9 @@ pub struct StorageReport {
     pub variants: Vec<StorageVariant>,
     /// Aged artifact and experiment paths, including safety refusals.
     pub candidates: Vec<StorageCandidate>,
+    /// Pending or failed removals, including preserved partial residue.
+    #[serde(default)]
+    pub quarantines: Vec<StorageQuarantine>,
     /// Effective storage policy switches.
     pub preferences: StoragePreferences,
     /// The most recent bounded cleanup audit records.

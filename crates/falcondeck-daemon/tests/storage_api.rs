@@ -28,6 +28,8 @@ async fn storage_api_reports_disk_persists_switches_and_requires_confirmation() 
         .unwrap();
     assert!(health.ok);
     assert!(health.free_bytes.is_some());
+    assert_eq!(health.volumes.len(),1);
+    assert!(health.volumes[0].free_bytes.is_some());
     let p = StoragePreferences {
         scheduled: false,
         clear_caches: false,
@@ -61,6 +63,9 @@ async fn storage_api_reports_disk_persists_switches_and_requires_confirmation() 
     assert_eq!(report.preferences, p);
     assert!(report.free_bytes.is_some());
     assert!(report.variants.is_empty());
+    assert_eq!(report.volumes.len(),health.volumes.len());
+    assert_eq!(report.volumes[0].id,health.volumes[0].id);
+    assert!(report.volumes[0].free_bytes.is_some());
     for (path, body) in [
         ("cleanup", serde_json::json!({"confirmed":false})),
         (

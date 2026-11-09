@@ -8,7 +8,7 @@ const report: StorageReport = {
   generated_at: 1_794_215_998, free_bytes: 12 * 2 ** 30,
   categories: { total: 100 * 2 ** 30, variants: 70 * 2 ** 30, codex_databases: 13 * 2 ** 30 },
   projects: { '/project': 70 * 2 ** 30 },
-  preferences: { scheduled: true, clear_caches: true, reclaim_checkouts: true, delete_old_artifacts: false, delete_old_experiments: false, warnings: true },
+  preferences: { scheduled: true, clear_caches: true, reclaim_checkouts: true, warnings: true },
   candidates: [{ path: '/artifacts/old', category: 'artifacts', bytes: 1, blocked: null }], runs: [],
   variants: [
     { workspace_id: 'w', thread_id: 'clean', title: 'Clean task', project: '/project', path: '/variants/clean', bytes: 20 * 2 ** 30, cache_bytes: 2 ** 30, idle_days: 20, archived: false, status: 'clean', cache_blocked: null, snapshot_blocked: 'Clean', blocked: null },
@@ -52,12 +52,40 @@ describe('Storage settings', () => {
     fireEvent.click(screen.getByRole('button',{name:'Confirm'}));
     await waitFor(()=>expect(api.snapshots).toHaveBeenCalledWith([{workspace_id:'w',thread_id:'dirty'}]));
   });
-  it('requires confirmation before enabling aged artifact deletion', async () => {
+  it('keeps artifacts and experiments candidate-only', async () => {
     render(<StoragePanel baseUrl="http://daemon" />); await screen.findByText('Clean task');
-    fireEvent.click(screen.getByRole('switch', { name: 'Delete artifacts unmodified for 30 days' }));
-    expect(api.updatePreferences).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    await waitFor(() => expect(api.updatePreferences).toHaveBeenCalledWith({ ...report.preferences, delete_old_artifacts: true }));
+    expect(screen.queryByRole('switch',{name:/Delete artifacts/})).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch',{name:/Delete experiments/})).not.toBeInTheDocument();
+    expect(screen.getByText(/never automatically deleted/)).toBeInTheDocument();
+  });
+  it('confirms the one-click eligible snapshot action with count and size', async()=>{
+    render(<StoragePanel baseUrl="http://daemon" />);await screen.findByText('Clean task');
+    fireEvent.click(screen.getByRole('button',{name:'Snapshot and reclaim eligible (1 · 10.00 GiB)'}));
+    expect(api.snapshots).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button',{name:'Confirm'}));
+    await waitFor(()=>expect(api.snapshots).toHaveBeenCalledWith([{workspace_id:'w',thread_id:'dirty'}]));
+  });
+  it('attributes free space to volumes and groups vendor-only deletions',async()=>{
+    api.report.mockResolvedValue({...report,volumes:[{id:'internal',path:'/internal',free_bytes:40*2**30},{id:'ssd',path:'/Volumes/SSD',free_bytes:2*2**30}],variants:report.variants.map(v=>({...v,vendor_deletions_only:v.thread_id==='dirty'}))});
+    render(<StoragePanel baseUrl="http://daemon" />);await screen.findByText('/Volumes/SSD');
+    expect(screen.getByText('2.00 GiB available')).toBeInTheDocument();
+    expect(screen.getByRole('heading',{name:'Tracked vendor deletions'})).toBeInTheDocument();
+    expect(screen.getByText(/1 checkouts · 10\.00 GiB/)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox',{name:'Select Dirty task for snapshot'})).toBeInTheDocument();
+  });
+  it('batches confirmed eligible snapshots and retains completed batch results on failure', async()=>{
+    const variants = Array.from({length:101},(_,i)=>({...report.variants[1],thread_id:`dirty-${i}`,title:`Dirty ${i}`,path:`/variants/dirty-${i}`}));
+    api.report.mockResolvedValue({...report,variants});
+    api.snapshots.mockResolvedValueOnce({entries:['First 100 quarantined']}).mockRejectedValueOnce(new Error('Last batch failed'));
+    render(<StoragePanel baseUrl="http://daemon" />);
+    await screen.findByRole('button',{name:/Snapshot and reclaim eligible \(101/});
+    fireEvent.click(screen.getByRole('button',{name:/Snapshot and reclaim eligible \(101/}));
+    expect(api.snapshots).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button',{name:'Confirm'}));
+    await waitFor(()=>expect(api.snapshots).toHaveBeenCalledTimes(2));
+    expect(api.snapshots.mock.calls.map(c=>c[0].length)).toEqual([100,1]);
+    expect(screen.getByText('First 100 quarantined')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Last batch failed');
   });
   it('shows inventory failures without enabling deletion', async () => {
     api.report.mockRejectedValue(new Error('Cannot inspect checkout'));
