@@ -193,40 +193,97 @@ impl AppState {
         Ok(waits)
     }
 
+    pub(super) fn job_wake_gate(&self, thread: &str) -> Arc<Mutex<()>> {
+        let mut gates = self
+            .inner
+            .job_wake_gates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(thread).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(Mutex::new(()));
+        gates.insert(thread.into(), Arc::downgrade(&gate));
+        gate
+    }
+
+    async fn claim_job_signal(
+        &self,
+        snapshot: &JobWatch,
+        signal: impl std::future::Future<Output = Option<String>>,
+    ) -> Result<Option<(JobWatch, String)>, DaemonError> {
+        let Some(outcome) = signal.await else {
+            return Ok(None);
+        };
+        self.edit_delegations(|l| {
+            let now = Utc::now();
+            // Probes await outside the ledger. The snapshot is never authority
+            // to send: finishing or another poll may have won in the meantime.
+            let job = l.jobs.iter_mut().find(|j| {
+                j.id == snapshot.id
+                    && j.delivered.is_none()
+                    && j.next_attempt.is_none_or(|at| at <= now)
+            })?;
+            job.outcome = Some(outcome.clone());
+            job.next_attempt = Some(now + ChronoDuration::minutes(5));
+            let claimed = job.clone();
+            for t in l.tasks.iter_mut().filter(|t| {
+                t.workspace == claimed.workspace
+                    && t.thread == claimed.thread
+                    && t.waiting == Some(claimed.wait())
+            }) {
+                t.waiting = None;
+            }
+            Some((claimed, outcome))
+        })
+        .await
+    }
+
+    async fn dispatch_job_wake(&self, job: &JobWatch, outcome: &str) -> Result<(), DaemonError> {
+        let _admission = self.job_wake_gate(&job.thread).lock_owned().await;
+        let pending = self
+            .delegation_store()
+            .await?
+            .lock()
+            .await
+            .jobs
+            .iter()
+            .any(|j| j.id == job.id && j.delivered.is_none());
+        if !pending {
+            return Ok(());
+        }
+        let request: SendTurnRequest = serde_json::from_value(json!({
+            "workspace_id": job.workspace, "thread_id": job.thread,
+            "user_item_id": format!("user-job-watch-{}", job.id),
+            "inputs": [{"type":"text", "text": format!("FalconDeck detached job {}: {outcome}. Verify the job before repeating side effects; continue the pending task.", job.id)}]
+        }))?;
+        // Cancellation uses this same gate, through actual queue/provider
+        // admission and its receipt, but unrelated workers keep progressing.
+        self.send_automatic_turn(request).await?;
+        self.edit_delegations(|l| {
+            if let Some(j) = l.jobs.iter_mut().find(|j| j.id == job.id) {
+                j.delivered = Some(Utc::now());
+            }
+        })
+        .await
+    }
+
     pub(super) async fn poll_job_watches(&self) -> Result<(), DaemonError> {
         let jobs = self.delegation_store().await?.lock().await.jobs.clone();
-        for job in jobs.into_iter().filter(|j| j.delivered.is_none()) {
-            if job.next_attempt.is_some_and(|at| at > Utc::now()) {
+        for snapshot in jobs.into_iter().filter(|j| j.delivered.is_none()) {
+            if snapshot.next_attempt.is_some_and(|at| at > Utc::now()) {
                 continue;
             }
-            let outcome = match job.outcome.clone() {
-                Some(value) => value,
-                None => match job.signal(Utc::now()).await {
-                    Some(value) => value,
-                    None => continue,
-                },
+            let signal = async {
+                match &snapshot.outcome {
+                    Some(value) => Some(value.clone()),
+                    None => snapshot.signal(Utc::now()).await,
+                }
             };
-            // Persist the signal before admission. A failed provider start or
-            // daemon restart retains the wake; delivery is at least once.
-            self.edit_delegations(|l| {
-                if let Some(j) = l.jobs.iter_mut().find(|j| j.id == job.id) {
-                    j.outcome = Some(outcome.clone());
-                    j.next_attempt = Some(Utc::now() + ChronoDuration::minutes(5));
-                }
-                for t in l
-                    .tasks
-                    .iter_mut()
-                    .filter(|t| t.thread == job.thread && t.waiting == Some(job.wait()))
-                {
-                    t.waiting = None;
-                }
-            })
-            .await?;
-            let request: SendTurnRequest = serde_json::from_value(json!({
-                "workspace_id": job.workspace, "thread_id": job.thread,
-                "user_item_id": format!("user-job-watch-{}", job.id),
-                "inputs": [{"type":"text", "text": format!("FalconDeck detached job {}: {outcome}. Verify the job before repeating side effects; continue the pending task.", job.id)}]
-            }))?;
+            let Some((job, outcome)) = self.claim_job_signal(&snapshot, signal).await? else {
+                continue;
+            };
             // Provider startup must not hold up deadlines or other job watches.
             let key = format!("job:{}", job.id);
             if !self
@@ -240,22 +297,8 @@ impl AppState {
             }
             let app = self.clone();
             tokio::spawn(async move {
-                match app.send_automatic_turn(request).await {
-                    Ok(_) => {
-                        if let Err(error) = app
-                            .edit_delegations(|l| {
-                                if let Some(j) = l.jobs.iter_mut().find(|j| j.id == job.id) {
-                                    j.delivered = Some(Utc::now());
-                                }
-                            })
-                            .await
-                        {
-                            tracing::warn!(%error, "job admission receipt could not be saved");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, watch = %job.id, "job wake retained for retry")
-                    }
+                if let Err(error) = app.dispatch_job_wake(&job, &outcome).await {
+                    tracing::warn!(%error, watch = %job.id, "job wake retained for retry");
                 }
                 app.inner
                     .delegation_sends
@@ -317,6 +360,78 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn finishing_during_a_probe_prevents_claim_and_wake() {
+        let (app, temp) = fixture().await;
+        ready(&app).await;
+        app.watch_job(
+            "workspace-1",
+            "thread-1",
+            None,
+            Some(temp.path().join("result")),
+            Utc::now() + ChronoDuration::hours(1),
+        )
+        .await
+        .unwrap();
+        let job = app.delegation_store().await.unwrap().lock().await.jobs[0].clone();
+        let (entered, probing) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        let poller = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.claim_job_signal(&job, async {
+                    entered.send(()).unwrap();
+                    resume.await.unwrap();
+                    Some("result file appeared".into())
+                })
+                .await
+                .unwrap()
+            }
+        });
+        probing.await.unwrap();
+        app.declare_task_wait("workspace-1", "thread-1", None)
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        assert!(poller.await.unwrap().is_none());
+        assert!(queued(&app).await.is_empty());
+        let store = app.delegation_store().await.unwrap();
+        let ledger = store.lock().await;
+        assert!(ledger.jobs[0].delivered.is_some());
+        assert!(
+            ledger.jobs[0].outcome.is_none(),
+            "stale probe must not mutate a cancelled watch"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_between_claim_and_dispatch_suppresses_wake() {
+        let (app, temp) = fixture().await;
+        ready(&app).await;
+        app.watch_job(
+            "workspace-1",
+            "thread-1",
+            None,
+            Some(temp.path().join("result")),
+            Utc::now() + ChronoDuration::hours(1),
+        )
+        .await
+        .unwrap();
+        let snapshot = app.delegation_store().await.unwrap().lock().await.jobs[0].clone();
+        let (job, outcome) = app
+            .claim_job_signal(&snapshot, async { Some("result file appeared".into()) })
+            .await
+            .unwrap()
+            .unwrap();
+        app.declare_task_wait("workspace-1", "thread-1", None)
+            .await
+            .unwrap();
+        app.dispatch_job_wake(&job, &outcome).await.unwrap();
+        assert!(queued(&app).await.is_empty());
+        let store = app.delegation_store().await.unwrap();
+        assert!(store.lock().await.jobs[0].delivered.is_some());
     }
 
     #[tokio::test]

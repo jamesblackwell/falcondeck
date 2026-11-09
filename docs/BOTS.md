@@ -321,7 +321,9 @@ For detached local jobs, `falcondeck_watch_job` takes a `pid` and/or absolute
 watch and declares waiting, even for a thread with no delegator. Up to sixteen
 pending watches are allowed per thread. The first observed signal (result file,
 process exit, or timeout) queues a wake to that worker. A result path is checked
-for existence only; its contents never enter the wake. Process start identity
+for existence only; its contents never enter the wake. A file signal only means
+the file exists, so callers should write an atomic completion sentinel (for
+example, rename a fully written temporary file). Process start identity
 is persisted to detect pid reuse; zombies count as exited. After restart the
 result file is checked first, a live matching process remains watched, a gone
 process wakes with exit status unknown, and an uncheckable or reused pid wakes

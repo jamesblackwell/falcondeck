@@ -1354,6 +1354,13 @@ impl AppState {
         waiting: Option<TaskWait>,
         actor: Option<&str>,
     ) -> Result<(), DaemonError> {
+        // A completed cancellation cannot race a later wake admission. Never
+        // hold the ledger writer while waiting for provider admission.
+        let _job_gate = if waiting.is_none() {
+            Some(self.job_wake_gate(thread).lock_owned().await)
+        } else {
+            None
+        };
         let found = self
             .edit_delegations(|l| {
                 let mut found = false;
@@ -1678,6 +1685,7 @@ fn observe(
         Some("waiting deadline passed; work remains open".to_string())
     } else if restarting && t.active && !t.closed {
         t.active = false;
+        t.closed = t.declared_finished;
         t.last_state =
             "interrupted by daemon restart; outcome unknown; inspect native recovery state".into();
         urgent = true;
@@ -1745,6 +1753,7 @@ fn observe(
             Some("needs input".into())
         } else if s.status == ThreadStatus::Error && !t.closed {
             t.active = false;
+            t.closed = t.declared_finished;
             if t.last_state.starts_with("failed/interrupted:") {
                 return None;
             }
@@ -2354,6 +2363,83 @@ mod tests {
         assert_eq!(l.tasks.len(), 2);
         assert_eq!(l.tasks[0].delivery, ResultDelivery::Wake);
         assert!(l.tasks.iter().all(|t| t.waiting.as_ref() == Some(&wait)));
+    }
+
+    async fn finished_then_error() -> (AppState, tempfile::TempDir) {
+        let (app, temp) = fixture().await;
+        let owner = bot(&app).await;
+        let worker = target(&app).await;
+        track(&app, &owner, &worker, ResultDelivery::Batch).await;
+        app.declare_task_wait("workspace-1", "reused", None)
+            .await
+            .unwrap();
+        status(&app, ThreadStatus::Error).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+        assert!(
+            report_list(&app)
+                .await
+                .iter()
+                .any(|r| r.urgent && r.text.contains("failed/interrupted"))
+        );
+        (app, temp)
+    }
+
+    #[tokio::test]
+    async fn finished_then_error_stays_closed_after_acknowledgement() {
+        let (app, _temp) = finished_then_error().await;
+        ack(&app).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+        assert!(report_list(&app).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finished_then_error_stays_closed_after_restart() {
+        // Restart may happen before the monitor ever observes the Error.
+        for observed in [false, true] {
+            let (app, _temp) = fixture().await;
+            let owner = bot(&app).await;
+            let worker = target(&app).await;
+            track(&app, &owner, &worker, ResultDelivery::Batch).await;
+            app.declare_task_wait("workspace-1", "reused", None)
+                .await
+                .unwrap();
+            status(&app, ThreadStatus::Error).await;
+            if observed {
+                app.poll_observations(false).await.unwrap();
+                ack(&app).await;
+            }
+            let restored = AppState::new_with_state_path(
+                "test".into(),
+                HashMap::new(),
+                app.inner.state_path.clone(),
+            );
+            *restored.inner.preferences.lock().await = app.preferences().await;
+            *restored.inner.workspaces.lock().await =
+                std::mem::take(&mut *app.inner.workspaces.lock().await);
+            restored.poll_observations(true).await.unwrap();
+            assert!(
+                restored
+                    .open_delegations("thread-1")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            ack(&restored).await;
+            restored.poll_observations(false).await.unwrap();
+            assert!(report_list(&restored).await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_then_error_stays_closed_when_worker_later_becomes_idle() {
+        let (app, _temp) = finished_then_error().await;
+        ack(&app).await;
+        status(&app, ThreadStatus::Idle).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+        assert!(report_list(&app).await.is_empty());
     }
 
     #[tokio::test]
