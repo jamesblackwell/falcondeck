@@ -125,6 +125,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/storage/preferences", get(storage_preferences).patch(storage_update_preferences))
         .route("/api/storage/cleanup", post(storage_cleanup))
         .route("/api/storage/variant", post(storage_variant))
+        .route("/api/storage/snapshots", post(storage_snapshots))
         .route("/api/snapshot", get(snapshot))
         .route(
             "/api/preferences",
@@ -630,6 +631,7 @@ async fn storage_update_preferences(State(state): State<AppState>, Json(p): Json
 async fn storage_cleanup(State(state): State<AppState>, Json(r): Json<falcondeck_core::storage::StorageCleanupRequest>) -> Result<Json<falcondeck_core::storage::StorageRun>, DaemonError> {
     Ok(Json(state.storage_cleanup(r.confirmed).await?))
 }
+async fn storage_snapshots(State(state):State<AppState>,Json(r):Json<falcondeck_core::storage::StorageSnapshotRequest>)->Result<Json<falcondeck_core::storage::StorageRun>,DaemonError> {Ok(Json(state.storage_snapshot_batch(r).await?))}
 async fn storage_variant(State(state): State<AppState>, Json(r): Json<falcondeck_core::storage::StorageActionRequest>) -> Result<Json<falcondeck_core::storage::StorageRun>, DaemonError> {
     Ok(Json(state.storage_variant_action(r).await?))
 }

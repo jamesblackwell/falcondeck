@@ -7,6 +7,7 @@
 
 /// Local activity analytics; never sent over the relay.
 pub mod analytics;
+/// Local disk inventory and daemon-owned storage cleanup contracts.
 pub mod storage;
 pub use analytics::*;
 /// Backup and restore protocol types.

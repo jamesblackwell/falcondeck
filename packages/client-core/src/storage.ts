@@ -6,7 +6,7 @@ export type StoragePreferences = {
 export type StorageVariant = {
   workspace_id: string; thread_id: string; title: string; project: string; path: string;
   bytes: number; cache_bytes: number; idle_days: number; archived: boolean;
-  status: 'clean' | 'dirty' | 'running'; blocked: string | null;
+  status: 'clean' | 'dirty' | 'running'; blocked: string | null; cache_blocked: string | null; snapshot_blocked: string | null;
 };
 export type StorageRun = { id?: string; started_at: number; finished_at: number | null; entries: string[] };
 export type StorageReport = {
@@ -30,7 +30,8 @@ export function storageClient(baseUrl: string) {
     health: () => request<StorageHealth>('health'),
     preferences: () => request<StoragePreferences>('storage/preferences'),
     updatePreferences: (p: StoragePreferences) => request<StoragePreferences>('storage/preferences', 'PATCH', p),
+    snapshots: (targets: {workspace_id:string;thread_id:string}[]) => request<StorageRun>('storage/snapshots','POST',{targets,confirmed:true}),
     cleanup: () => request<StorageRun>('storage/cleanup', 'POST', { confirmed: true }),
-    variant: (v: StorageVariant, action: 'clear_caches' | 'reclaim') => request<StorageRun>('storage/variant', 'POST', { workspace_id: v.workspace_id, thread_id: v.thread_id, action, confirmed: true }),
+    variant: (v: StorageVariant, action: 'clear_caches' | 'reclaim' | 'snapshot_reclaim') => request<StorageRun>('storage/variant', 'POST', { workspace_id: v.workspace_id, thread_id: v.thread_id, action, confirmed: true }),
   };
 }

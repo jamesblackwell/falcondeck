@@ -25,6 +25,13 @@ use super::{matches_allowlist, run_git};
 /// block reclaiming.
 const REBUILDABLE: &[&str] = &[
     "node_modules",
+    ".cache",
+    ".cxx",
+    ".gradle",
+    "Pods",
+    ".parcel-cache",
+    ".svelte-kit",
+    "build",
     "/vendor",
     "/target",
     ".next",
@@ -63,6 +70,8 @@ pub async fn reclaim_if_safe(project_path: &str, variant: &ThreadVariant) -> Rec
 
 pub(crate) struct Assessment {
     head: String,
+    snapshot: Option<super::snapshot::Snapshot>,
+    requires_snapshot: bool,
 }
 
 /// Network work runs before taking the app's admission gate. A ticket never
@@ -70,6 +79,19 @@ pub(crate) struct Assessment {
 pub(crate) async fn assess(
     project_path: &str,
     variant: &ThreadVariant,
+) -> Result<Assessment, Reclaim> {
+    assess_mode(project_path, variant, false).await
+}
+pub(crate) async fn assess_for_snapshot(
+    project_path: &str,
+    variant: &ThreadVariant,
+) -> Result<Assessment, Reclaim> {
+    assess_mode(project_path, variant, true).await
+}
+async fn assess_mode(
+    project_path: &str,
+    variant: &ThreadVariant,
+    allow_dirty: bool,
 ) -> Result<Assessment, Reclaim> {
     if variant.kind != ThreadVariantKind::Worktree {
         return Err(Reclaim::Kept(vec!["not a worktree variant".into()]));
@@ -80,13 +102,29 @@ pub(crate) async fn assess(
     let head = run_git(&variant.path, &["rev-parse", "HEAD"])
         .await
         .map_err(|e| Reclaim::Kept(vec![e.to_string()]))?;
-    let blockers = blockers(project_path, variant).await;
+    let blockers = blockers_mode(project_path, variant, allow_dirty).await;
     if !blockers.is_empty() {
         return Err(Reclaim::Kept(blockers));
     }
-    Ok(Assessment { head })
+    Ok(Assessment {
+        head,
+        snapshot: None,
+        requires_snapshot: allow_dirty,
+    })
 }
 
+pub(crate) async fn finish_snapshot_reclaim(
+    project: &str,
+    variant: &ThreadVariant,
+    mut assessment: Assessment,
+    snapshot: super::snapshot::Snapshot,
+) -> Reclaim {
+    if assessment.head.trim() != snapshot.head {
+        return Reclaim::Kept(vec!["Snapshot HEAD differs from assessed branch".into()]);
+    }
+    assessment.snapshot = Some(snapshot);
+    finish_reclaim(project, variant, assessment).await
+}
 pub(crate) async fn finish_reclaim(
     project_path: &str,
     variant: &ThreadVariant,
@@ -95,11 +133,14 @@ pub(crate) async fn finish_reclaim(
     if !Path::new(&variant.path).exists() {
         return Reclaim::Removed;
     }
+    if assessment.requires_snapshot && assessment.snapshot.is_none() {
+        return Reclaim::Kept(vec!["Manual snapshot authorization is missing".into()]);
+    }
     // Remote verification can be slow; recheck local state and processes at
     // the destructive boundary as well as before the network call.
     let mut fresh = checkout_identity(variant).await;
     fresh.extend(
-        status_blockers(project_path, &variant.path)
+        status_blockers_mode(project_path, &variant.path, assessment.snapshot.is_some())
             .await
             .unwrap_or_else(|e| vec![e]),
     );
@@ -126,14 +167,26 @@ pub(crate) async fn finish_reclaim(
     {
         return Reclaim::Kept(vec![format!("could not preserve checkout setup: {e}")]);
     }
-    if let Err(error) = git(
-        project_path,
-        &["worktree", "remove", &variant.path],
-        &[],
-        FETCH_TIMEOUT,
-    )
-    .await
-    {
+    let mut removal = vec!["worktree", "remove"];
+    if let Some(snapshot) = assessment.snapshot.as_ref() {
+        if let Err(e) = super::snapshot::verify(&variant.path, snapshot).await {
+            return Reclaim::Kept(vec![e.to_string()]);
+        }
+        if let Err(e) = super::snapshot::save_pending(project_path, &variant.slug, snapshot).await {
+            return Reclaim::Kept(vec![e.to_string()]);
+        }
+        if let Err(e) = super::snapshot::verify(&variant.path, snapshot).await {
+            let _ = super::snapshot::clear_pending(project_path, &variant.slug).await;
+            return Reclaim::Kept(vec![e.to_string()]);
+        }
+        // Force is exclusively authorized by an immutable, verified snapshot.
+        // Normal and scheduled reclamation never enter this branch.
+        removal.push("--force");
+    } else if let Err(e) = super::snapshot::clear_pending(project_path, &variant.slug).await {
+        return Reclaim::Kept(vec![e.to_string()]);
+    }
+    removal.push(&variant.path);
+    if let Err(error) = git(project_path, &removal, &[], FETCH_TIMEOUT).await {
         return Reclaim::Kept(vec![format!("git worktree remove refused: {error}")]);
     }
     let _ = run_git(project_path, &["worktree", "prune"]).await;
@@ -149,6 +202,16 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
     }
     if Path::new(&variant.path).exists() {
         super::populated(&variant.path).await?;
+        if let (Ok(Some(saved)), Ok(Some(marker))) = (
+            super::snapshot::load(project_path, &variant.slug).await,
+            super::snapshot::restored_marker(&variant.path).await,
+        ) {
+            if saved.pending && saved.oid == marker.oid {
+                super::snapshot::finish_restore(project_path, &variant.slug, &variant.path)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         return Ok(false);
     }
     let reference = format!("refs/heads/{}", variant.branch);
@@ -179,7 +242,11 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
 }
 
 /// Reasons the checkout must be kept; empty means safe to remove.
-async fn blockers(project_path: &str, variant: &ThreadVariant) -> Vec<String> {
+async fn blockers_mode(
+    project_path: &str,
+    variant: &ThreadVariant,
+    allow_dirty: bool,
+) -> Vec<String> {
     let mut reasons = checkout_identity(variant).await;
     if !reasons.is_empty() {
         return reasons;
@@ -187,19 +254,31 @@ async fn blockers(project_path: &str, variant: &ThreadVariant) -> Vec<String> {
     if let Err(reason) = process_clear(Path::new(&variant.path)).await {
         return vec![reason];
     }
-    match status_blockers(project_path, &variant.path).await {
+    match status_blockers_mode(project_path, &variant.path, allow_dirty).await {
         Ok(found) => reasons.extend(found),
         Err(error) => return vec![format!("could not read git status: {error}")],
     }
-    match unpushed_commits(project_path, &variant.path).await {
-        Ok(0) => {}
-        Ok(count) => reasons.push(format!("{count} commit(s) not on a remote")),
-        Err(error) => reasons.push(format!("remote state unverified: {error}")),
+    if !allow_dirty {
+        match unpushed_commits(project_path, &variant.path).await {
+            Ok(0) => {}
+            Ok(count) => reasons.push(format!("{count} commit(s) not on a remote")),
+            Err(error) => reasons.push(format!("remote state unverified: {error}")),
+        }
     }
+    // A manual snapshot pins HEAD as a parent, preserving unpublished history
+    // locally as well as keeping the branch. Automatic reclamation still
+    // requires live remote reachability.
     reasons
 }
 
 pub(super) async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, String> {
+    status_blockers_mode(project_path, path, false).await
+}
+pub(super) async fn status_blockers_mode(
+    project_path: &str,
+    path: &str,
+    allow_dirty: bool,
+) -> Result<Vec<String>, String> {
     let out = git(
         path,
         &[
@@ -231,10 +310,10 @@ pub(super) async fn status_blockers(project_path: &str, path: &str) -> Result<Ve
             _ => tracked += 1,
         }
     }
-    if tracked > 0 {
+    if tracked > 0 && !allow_dirty {
         reasons.push(format!("{tracked} uncommitted change(s)"));
     }
-    if untracked > 0 {
+    if untracked > 0 && !allow_dirty {
         reasons.push(format!("{untracked} untracked file(s)"));
     }
     if let Some(first) = other_ignored.first() {

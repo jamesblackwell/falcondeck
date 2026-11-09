@@ -169,16 +169,19 @@ the production timer no longer uses their 72-hour policy.
 
 - Only managed Git worktree variants are eligible. Main project checkouts,
   shared paths, standalone clones, symlink roots and symlink ancestors stay.
-- Running, waiting, queued and dispatching tasks stay. Both task activity and
-  recursive filesystem modification time must be more than 24 hours old, including
-  the worktree-specific HEAD, index and HEAD reflog.
-- Dirty variants stay, including untracked files and hidden index flags. Storage
-  shows these tasks for opening, with no deletion buttons.
-- After more than 3 idle days, remove only known ecosystem cache directories
-  which Git ignores and which contain no tracked files: `node_modules`,
-  `DerivedData`, `.next`, `.nuxt`, `.turbo`, Python/PHP/framework caches; anchored
-  `target`, `dist`, `build`, `vendor`, `.venv`, frontend/iOS/Android build roots.
-  `.cache` and arbitrary `build`/`vendor` directories are not a global allowlist.
+- Running, waiting, queued and dispatching tasks stay, as do checkouts with live
+  processes. Task activity must be more than 24 hours old.
+- Automatic checkout reclamation requires a clean tree, including no untracked
+  files or hidden index flags, and recursive filesystem activity older than
+  24 hours, including the worktree-specific HEAD, index and HEAD reflog.
+- After more than 3 idle days, caches can be cleared in **clean or dirty**
+  variants. For this action, 24-hour filesystem activity is measured only on
+  tracked and non-ignored untracked files; cache mtimes do not block cleanup.
+  Each directory must be Git-ignored and have no tracked descendants. Known
+  caches include `node_modules`, `.cache`, `build`, `DerivedData`, `.cxx`,
+  `.gradle`, `Pods`, `.next`, `.nuxt`, `.turbo`, `.parcel-cache`, `.svelte-kit`,
+  Python/PHP/framework caches, and anchored `target`, `dist`, `vendor`, `.venv`
+  and frontend/iOS/Android build roots. Authored non-ignored files stay.
 - A project may extend cache paths with a **local-only**, declarative JSON list:
   `git config --local falcondeck.storageCaches '["frontend/.cache"]'`.
   Only relative paths with no `.`/`..`/`.git` components are accepted. No project
@@ -213,14 +216,44 @@ runs. Categories include unmanaged worktrees, bot homes and other data under
 Other. Cache/content subtotals are parts of Variants, not additional disk use.
 APFS shared extents mean allocated totals are estimates, not physical recovery.
 
-All destructive UI actions require explicit confirmation. Dirty/running tasks
-can only be opened. Cache clearing and reclaiming are available individually for
-eligible clean rows, and Clean up now runs the scheduled policy. Restoring a
-reclaimed task continues to use the existing branch/recipe path.
+All destructive UI actions require explicit confirmation. Running tasks can only
+be opened. Eligible dirty tasks can have caches cleared, but automatic cleanup
+never removes their checkout. Clean rows offer ordinary reclamation. Clean up
+now runs the scheduled policy.
+
+Dirty variants idle for more than 7 days appear by size with checkboxes and a
+manual-only bulk **Snapshot and reclaim** action. Each selected checkout must
+pass identity, process, operation/index-flag and full-checkout 24-hour checks.
+The cache-only recency exception does not apply to snapshot reclamation.
+An alternate Git index captures tracked changes, non-ignored additions, deletions,
+renames and binaries into a commit under `refs/falcondeck/snapshots/<slug>` in the
+shared Git directory. The real index and branch are untouched. The commit pins
+HEAD and any previous snapshot, so unpublished branch history is retained locally;
+this explicit action does not require remote publication. Submodules and
+non-UTF-8 paths are retained for manual review.
+
+The daemon verifies the snapshot tree and materialized paths against a fresh
+capture, then repeats verification at the shared reclamation boundary. A changed
+working tree aborts removal. Only this verified manual path authorizes force
+removal; scheduled/ordinary reclamation retains Git's cleanliness safeguard.
+Snapshot metadata and sparse recipe survive checkout removal. Restore applies the
+snapshot in private staging, verifies it, and restores the branch index so saved
+working changes return unstaged. A verified marker distinguishes intentional
+all-file deletions from an incomplete checkout; an ordinary restore marker cannot
+excuse a later checkout with all tracked files missing. Snapshot refs are retained;
+there is no automatic history pruning. Snapshot objects consume some space, and
+ignored non-regenerable data still blocks reclamation.
+
+Legacy full-to-sparse conversion is deferred: live conversion needs a separate
+transaction and rollback path; existing provisioning only safely applies sparse
+recipes before publishing a new checkout. The audit records the measured upper
+bound without converting any existing checkout.
 
 Local endpoints: `GET /api/storage`, `GET/PATCH /api/storage/preferences`,
 `POST /api/storage/cleanup` (`confirmed: true`), and `POST /api/storage/variant`
-(`workspace_id`, `thread_id`, `action: clear_caches|reclaim`, `confirmed: true`).
+(`workspace_id`, `thread_id`, `action: clear_caches|reclaim|snapshot_reclaim`,
+`confirmed: true`). `POST /api/storage/snapshots` accepts `confirmed: true` and
+1–100 explicit `{workspace_id, thread_id}` targets; results are logged per target.
 `GET /api/health` adds nullable `free_bytes`, measured by statvfs without a disk
 inventory; bots can check it cheaply. These are local daemon APIs, not new relay,
 pairing or device operations.
@@ -228,8 +261,8 @@ pairing or device operations.
 ### Safety checks shared with scripts/worktree-gc.mjs
 
 1. The checkout must still be attached to its recorded variant branch. A
-   different branch or detached HEAD is retained; no hidden recovery refs are
-   introduced. The script also refuses detached worktrees and mismatched owner
+   different branch or detached HEAD is retained. Manual snapshots use the
+   explicit recovery refs documented above. The script also refuses detached worktrees and mismatched owner
    branches.
 2. Tracked and untracked changes block. Ignored and untracked env copies pass
    only when byte-identical to the project's originals.

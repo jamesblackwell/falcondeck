@@ -17,11 +17,12 @@ use uuid::Uuid;
 use crate::error::DaemonError;
 
 mod reclaim;
+pub(crate) mod snapshot;
 mod setup;
 #[cfg(test)]
 pub(crate) use reclaim::test_no_docker_mounts;
 pub use reclaim::{Reclaim, reclaim_if_safe, restore};
-pub(crate) use reclaim::{assess, finish_reclaim, process_clear, hidden_or_in_progress};
+pub(crate) use reclaim::{assess_for_snapshot,finish_snapshot_reclaim,assess, finish_reclaim, process_clear, hidden_or_in_progress};
 pub(crate) use setup::hint as sparse_hint;
 
 /// Untracked files carried into a worktree-backed variant.
@@ -187,13 +188,15 @@ async fn populate_worktree(
         }
         setup::provision(project, &staging, &setup).await?;
         populated(&stage).await.map_err(DaemonError::Rpc)?;
-        copy_untracked_allowlist(project, &staging).await;
+        let restored_snapshot=snapshot::apply_pending(project,slug,&stage).await?;
+        if restored_snapshot {copy_allowlist_filtered(project,&staging,true).await;} else {copy_untracked_allowlist(project, &staging).await;}
         setup::save_setup(project, slug, &staging, setup.clone()).await?;
         run_git(
             project,
             &["worktree", "move", &stage, &destination.to_string_lossy()],
         )
         .await?;
+        snapshot::finish_restore(project,slug,&destination.to_string_lossy()).await?;
         Ok::<_, DaemonError>(())
     }
     .await;
@@ -309,7 +312,7 @@ async fn recover_staging(
             let blockers = reclaim::status_blockers(project, &path.to_string_lossy())
                 .await
                 .map_err(DaemonError::Rpc)?;
-            if !blockers.is_empty() {
+            if !blockers.is_empty() && (!snapshot::known_staging(&path.to_string_lossy()).await || !reclaim::status_blockers_mode(project,&path.to_string_lossy(),true).await.map_err(DaemonError::Rpc)?.is_empty()) {
                 return Err(DaemonError::Rpc(format!(
                     "Interrupted staging requires review: {}: {}",
                     path.display(),
@@ -370,6 +373,7 @@ pub(crate) async fn populated(path: &str) -> Result<(), String> {
             .filter(|p| !p.is_empty())
             .any(|p| root.join(p).symlink_metadata().is_ok())
     {
+        if snapshot::approved_empty_checkout(path).await {return Ok(());}
         return Err(format!(
             "isolated checkout at {path} is not populated; refusing to run with every tracked file missing"
         ));
@@ -562,8 +566,10 @@ async fn add_worktree(
 /// Copies untracked files matching [`UNTRACKED_ALLOWLIST`] into a worktree
 /// variant. Best-effort: a missing `.env` is a nuisance, not a reason to fail
 /// thread creation.
-async fn copy_untracked_allowlist(project_path: &str, destination: &Path) {
+async fn copy_untracked_allowlist(project_path:&str,destination:&Path) {copy_allowlist_filtered(project_path,destination,false).await;}
+async fn copy_allowlist_filtered(project_path: &str, destination: &Path, ignored_only:bool) {
     for relative in untracked_allowlist_matches(project_path).await {
+        if ignored_only && run_git(&destination.to_string_lossy(),&["check-ignore","-q","--",&relative]).await.is_err(){continue;}
         let source = Path::new(project_path).join(&relative);
         let target = destination.join(&relative);
         if let Some(parent) = target.parent()

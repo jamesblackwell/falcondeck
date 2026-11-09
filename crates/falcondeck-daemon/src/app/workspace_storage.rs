@@ -11,6 +11,13 @@ const DAY: i64 = 86400;
 const GIB: u64 = 1024 * 1024 * 1024;
 const CACHE_NAMES: &[&str] = &[
     "node_modules",
+    ".cache",
+    ".cxx",
+    ".gradle",
+    "Pods",
+    ".parcel-cache",
+    ".svelte-kit",
+    "build",
     "DerivedData",
     ".next",
     ".nuxt",
@@ -163,7 +170,14 @@ async fn git(path: &str, args: &[&str]) -> Result<String, DaemonError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 fn quiet(t: &ManagedThread) -> bool {
-    t.summary.status == ThreadStatus::Idle
+    !matches!(
+        t.summary.status,
+        ThreadStatus::Running | ThreadStatus::WaitingForInput
+    ) && !t
+        .summary
+        .variant
+        .as_ref()
+        .is_some_and(|v| crate::variant::dependencies_pending(&v.path))
         && t.summary.queued_turns.is_empty()
         && t.queued_requests.is_empty()
         && t.dispatching_request.is_none()
@@ -173,6 +187,7 @@ fn due(idle_age: i64, archived: bool, newest: i64, now: i64, action: StorageActi
         && match action {
             StorageAction::ClearCaches => idle_age > 3 * DAY,
             StorageAction::Reclaim => archived || idle_age > 14 * DAY,
+            StorageAction::SnapshotReclaim => idle_age > 7 * DAY,
         }
 }
 pub(super) fn disk_level(bytes: u64) -> &'static str {
@@ -359,6 +374,33 @@ impl AppState {
         }
         Ok(())
     }
+    async fn non_ignored_activity(&self, path: &str) -> Result<i64, DaemonError> {
+        let files = git(
+            path,
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+        )
+        .await?;
+        let mut newest = 0;
+        for name in files.split('\0').filter(|p| !p.is_empty()) {
+            let file = Path::new(path).join(name);
+            let metadata = match tokio::fs::symlink_metadata(&file).await {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // A tracked deletion has no inode; its parent records when it vanished.
+                    tokio::fs::symlink_metadata(file.parent().unwrap_or(Path::new(path))).await?
+                }
+                Err(e) => return Err(e.into()),
+            };
+            newest = newest.max(seconds(metadata.modified()?));
+        }
+        Ok(newest)
+    }
     async fn cache_paths(&self, project: &str, v: &ThreadVariant) -> Result<Facts, DaemonError> {
         let mut f = facts(PathBuf::from(&v.path), Self::cache_hook(project).await?).await?;
         let git_dir = PathBuf::from(
@@ -483,6 +525,34 @@ impl AppState {
                     .err()
                     .map(|e| e.to_string())
             };
+            let cache_blocked = if !quiet {
+                Some("Running or queued task".into())
+            } else if now.saturating_sub(updated.timestamp()) <= 3 * DAY {
+                Some("Task has not been idle for more than 3 days".into())
+            } else if now.saturating_sub(self.non_ignored_activity(&v.path).await?) <= DAY {
+                Some("Non-ignored files modified within 24 hours".into())
+            } else {
+                self.storage_identity(&project, &v)
+                    .await
+                    .err()
+                    .map(|e| e.to_string())
+            };
+            let snapshot_blocked = if clean {
+                Some("Only dirty variants need a snapshot".into())
+            } else if !quiet || now.saturating_sub(updated.timestamp()) <= 7 * DAY {
+                Some("Snapshot requires more than 7 idle days and no queued work".into())
+            } else if now.saturating_sub(f.newest) <= DAY {
+                Some("Checkout modified within 24 hours".into())
+            } else {
+                match self.storage_identity(&project, &v).await {
+                    Err(e) => Some(e.to_string()),
+                    Ok(()) => {
+                        let blockers =
+                            crate::variant::snapshot::blockers(&project, &v.path).await?;
+                        (!blockers.is_empty()).then(|| blockers.join("; "))
+                    }
+                }
+            };
             *projects.entry(project.clone()).or_insert(0) += f.bytes;
             caches += cache_bytes;
             variants.push(StorageVariant {
@@ -504,6 +574,8 @@ impl AppState {
                 }
                 .into(),
                 blocked,
+                cache_blocked,
+                snapshot_blocked,
             });
         }
         variants.sort_by_key(|v| std::cmp::Reverse(v.bytes));
@@ -526,6 +598,62 @@ impl AppState {
             preferences: self.storage_preferences().await?,
             runs: self.storage_json("storage-runs.json").await?,
         })
+    }
+    pub async fn storage_snapshot_batch(
+        &self,
+        r: StorageSnapshotRequest,
+    ) -> Result<StorageRun, DaemonError> {
+        if !r.confirmed || r.targets.is_empty() || r.targets.len() > 100 {
+            return Err(DaemonError::BadRequest(
+                "Confirm one to one hundred explicitly selected dirty variants".into(),
+            ));
+        }
+        let app = self.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if !self.spawn_background_task(async move {
+            let result = async {
+                app.storage_test_boundary()?;
+                let _guard = app.inner.storage_gate.lock().await;
+                let mut run = StorageRun {
+                    id: Uuid::new_v4().to_string(),
+                    started_at: Utc::now().timestamp(),
+                    ..Default::default()
+                };
+                app.save_storage_run(&run).await?;
+                let mut seen = HashSet::new();
+                for target in r.targets {
+                    if app.is_shutting_down() {
+                        break;
+                    }
+                    if !seen.insert((target.workspace_id.clone(), target.thread_id.clone())) {
+                        continue;
+                    }
+                    let result = app
+                        .storage_action(
+                            &target.workspace_id,
+                            &target.thread_id,
+                            StorageAction::SnapshotReclaim,
+                            false,
+                        )
+                        .await;
+                    run.entries.push(format!(
+                        "Snapshot {}/{}: {}",
+                        target.workspace_id,
+                        target.thread_id,
+                        result.unwrap_or_else(|e| e.to_string())
+                    ));
+                    app.save_storage_run(&run).await?;
+                }
+                run.finished_at = Some(Utc::now().timestamp());
+                app.save_storage_run(&run).await?;
+                Ok::<_, DaemonError>(run)
+            }
+            .await;
+            let _ = tx.send(result);
+        }) {
+            return Err(DaemonError::Conflict("Daemon is shutting down".into()));
+        }
+        rx.await.map_err(|e| DaemonError::Rpc(e.to_string()))?
     }
     pub async fn storage_variant_action(
         &self,
@@ -605,11 +733,17 @@ impl AppState {
         self.storage_identity(&project, &v).await?;
         // Network checks stay outside the admission gate; final reclamation
         // repeats the existing local/process/branch/recipe safety checks.
-        let assessment = if action == StorageAction::Reclaim {
+        let assessment = if matches!(
+            action,
+            StorageAction::Reclaim | StorageAction::SnapshotReclaim
+        ) {
             Some(
-                crate::variant::assess(&project, &v)
-                    .await
-                    .map_err(|r| DaemonError::Rpc(format!("{r:?}")))?,
+                if action == StorageAction::SnapshotReclaim {
+                    crate::variant::assess_for_snapshot(&project, &v).await
+                } else {
+                    crate::variant::assess(&project, &v).await
+                }
+                .map_err(|r| DaemonError::Rpc(format!("{r:?}")))?,
             )
         } else {
             None
@@ -618,6 +752,11 @@ impl AppState {
         let _guard = gate.lock().await;
         let now = Utc::now().timestamp();
         let f = self.cache_paths(&project, &v).await?;
+        let newest = if action == StorageAction::ClearCaches {
+            self.non_ignored_activity(&v.path).await?
+        } else {
+            f.newest
+        };
         self.storage_identity(&project, &v).await?;
         {
             let ws = self.inner.workspaces.lock().await;
@@ -628,13 +767,17 @@ impl AppState {
             if !quiet(t)
                 || t.summary.updated_at != activity
                 || t.summary.variant.as_ref() != Some(&v)
-                || now.saturating_sub(f.newest) <= DAY
+                || now.saturating_sub(newest) <= DAY
                 || now.saturating_sub(activity.timestamp()) <= DAY
+                || (action == StorageAction::ClearCaches
+                    && now.saturating_sub(activity.timestamp()) <= 3 * DAY)
+                || (action == StorageAction::SnapshotReclaim
+                    && now.saturating_sub(activity.timestamp()) <= 7 * DAY)
                 || (enforce_age
                     && !due(
                         now - activity.timestamp(),
                         t.summary.is_archived,
-                        f.newest,
+                        newest,
                         now,
                         action,
                     ))
@@ -644,24 +787,47 @@ impl AppState {
                 ));
             }
         }
-        if !crate::variant::hidden_or_in_progress(&v.path)
-            .await
-            .map_err(DaemonError::Rpc)?
-            .is_empty()
+        if action != StorageAction::ClearCaches
+            && !crate::variant::hidden_or_in_progress(&v.path)
+                .await
+                .map_err(DaemonError::Rpc)?
+                .is_empty()
         {
             return Err(DaemonError::Rpc(
                 "Hidden index flags or Git operation retained".into(),
             ));
         }
-        if !git(&v.path, &["status", "--porcelain", "--untracked-files=all"])
-            .await?
-            .is_empty()
+        if action == StorageAction::Reclaim
+            && !git(&v.path, &["status", "--porcelain", "--untracked-files=all"])
+                .await?
+                .is_empty()
         {
             return Err(DaemonError::Rpc("Dirty variant retained".into()));
         }
         crate::variant::process_clear(Path::new(&v.path))
             .await
             .map_err(DaemonError::Rpc)?;
+        if action == StorageAction::SnapshotReclaim {
+            if git(&v.path, &["status", "--porcelain", "--untracked-files=all"])
+                .await?
+                .is_empty()
+            {
+                return Err(DaemonError::BadRequest(
+                    "Only dirty variants need a snapshot".into(),
+                ));
+            }
+            let snapshot = crate::variant::snapshot::create(&v.path, &v.slug).await?;
+            return Ok(format!(
+                "{:?}",
+                crate::variant::finish_snapshot_reclaim(
+                    &project,
+                    &v,
+                    assessment.unwrap(),
+                    snapshot
+                )
+                .await
+            ));
+        }
         if let Some(ticket) = assessment {
             return Ok(format!(
                 "{:?}",
@@ -688,20 +854,13 @@ impl AppState {
             {
                 continue;
             }
-            // Recheck contents immediately before each removal, including ignored files.
-            if now.saturating_sub(facts(p.clone(), Vec::new()).await?.newest) <= DAY {
-                continue;
-            }
-            if !git(&v.path, &["status", "--porcelain", "--untracked-files=all"])
-                .await?
-                .is_empty()
-                || !crate::variant::hidden_or_in_progress(&v.path)
-                    .await
-                    .map_err(DaemonError::Rpc)?
-                    .is_empty()
+            if Utc::now()
+                .timestamp()
+                .saturating_sub(self.non_ignored_activity(&v.path).await?)
+                <= DAY
             {
                 return Err(DaemonError::Rpc(
-                    "Variant changed during cache cleanup; retained remaining caches".into(),
+                    "Non-ignored files changed during cleanup; remaining caches retained".into(),
                 ));
             }
             crate::variant::process_clear(Path::new(&v.path))
@@ -778,12 +937,13 @@ impl AppState {
             if self.is_shutting_down() {
                 break;
             }
-            if v.blocked.is_some() {
-                continue;
-            }
-            let action = if p.reclaim_checkouts && (v.archived || v.idle_days >= 14) {
+            let action = if v.status == "clean"
+                && v.blocked.is_none()
+                && p.reclaim_checkouts
+                && (v.archived || v.idle_days >= 14)
+            {
                 Some(StorageAction::Reclaim)
-            } else if p.clear_caches && v.idle_days >= 3 {
+            } else if p.clear_caches && v.cache_blocked.is_none() && v.idle_days >= 3 {
                 Some(StorageAction::ClearCaches)
             } else {
                 None
@@ -797,6 +957,27 @@ impl AppState {
                         "{}: {}",
                         v.path,
                         result.unwrap_or_else(|e| e.to_string())
+                    ));
+                }
+                // A remote/ignored-file blocker on checkout reclamation must
+                // not prevent independently safe cache cleanup in that tree.
+                if action == StorageAction::Reclaim
+                    && p.clear_caches
+                    && v.cache_blocked.is_none()
+                    && Path::new(&v.path).exists()
+                {
+                    let caches = self
+                        .storage_action(
+                            &v.workspace_id,
+                            &v.thread_id,
+                            StorageAction::ClearCaches,
+                            true,
+                        )
+                        .await;
+                    run.entries.push(format!(
+                        "{} caches: {}",
+                        v.path,
+                        caches.unwrap_or_else(|e| e.to_string())
                     ));
                 }
                 self.save_storage_run(&run).await?;
