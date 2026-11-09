@@ -4,6 +4,8 @@ use chrono::DateTime;
 use falcondeck_core::{TaskWait, ThreadOrigin};
 use serde::{Deserialize, Serialize};
 
+mod job_watches;
+
 const RETENTION_DAYS: i64 = 7;
 const MAX_REPORTS: usize = 100;
 const MAX_TASKS: usize = 200;
@@ -43,6 +45,18 @@ struct Delegation {
     created: DateTime<Utc>,
     #[serde(default = "Utc::now")]
     changed: DateTime<Utc>,
+    last_activity: Option<DateTime<Utc>>,
+    quiet_since: Option<DateTime<Utc>>,
+    activity_seq: Option<u64>,
+    observed_status: Option<ThreadStatus>,
+}
+
+impl Delegation {
+    fn quiet_deadline(&self, seconds: u32) -> Option<DateTime<Utc>> {
+        let activity = self.last_activity.unwrap_or(self.created);
+        let since = self.quiet_since.map_or(activity, |at| at.max(activity));
+        (seconds > 0).then(|| since + ChronoDuration::seconds(seconds.into()))
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -64,6 +78,9 @@ struct Report {
     escalated: bool,
     recovery: bool,
     historical: bool,
+    delivery: ResultDelivery,
+    acknowledged: Option<DateTime<Utc>>,
+    retired: Option<DateTime<Utc>>,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,6 +88,8 @@ struct Report {
 pub(super) struct Ledger {
     tasks: Vec<Delegation>,
     reports: Vec<Report>,
+    history: Vec<Report>,
+    jobs: Vec<job_watches::JobWatch>,
     // Old date map is retained for loading the first implementation.
     daily: HashMap<String, chrono::NaiveDate>,
     daily_sent: HashMap<String, DateTime<Utc>>,
@@ -163,11 +182,11 @@ impl AppState {
                 Err(e) => return Err(e.into()),
             };
             ledger.tasks.retain(|t| !t.id.is_empty() && !t.thread.is_empty() && !t.bot_id.is_empty());
+            // Restore unverified intervals that older builds prematurely closed.
             for task in &mut ledger.tasks {
-                // Old ordinary idle records must not become perpetual reminders.
-                if !task.active && task.waiting.is_none() && (task.last_state.starts_with("finished (") || task.last_state == "turn ended; completion unverified") {
-                    task.closed = true;
-                    task.same_turn_resume = !task.last_state.starts_with("finished (");
+                if !task.declared_finished && task.last_state == "turn ended; completion unverified" {
+                    task.closed = false;
+                    task.same_turn_resume = false;
                 }
             }
             Ok(Mutex::new(ledger))
@@ -234,6 +253,9 @@ impl AppState {
                     waiting,
                     created: Utc::now(),
                     changed: Utc::now(),
+                    last_activity: Some(Utc::now()),
+                    activity_seq: Some(summary.attention.last_agent_activity_seq),
+                    observed_status: Some(summary.status.clone()),
                     ..Default::default()
                 });
                 Ok(id.clone())
@@ -300,7 +322,7 @@ impl AppState {
             if let Some(t) = l.tasks.iter_mut().find(|t| t.id == id) {
                 t.admitted = true;
                 t.active = false;
-                t.closed = true;
+                t.closed = false;
                 t.same_turn_resume = false;
                 t.last_state = format!(
                     "dispatch failed before a confirmed turn start: {}",
@@ -618,6 +640,7 @@ impl AppState {
     }
 
     async fn poll_observations(&self, restarting: bool) -> Result<(), DaemonError> {
+        let quiet_seconds = self.preferences().await.delegation_quiet_seconds;
         let (observations, cloud_known) = self.observations().await;
         let known_workspaces: HashSet<_> = self
             .inner
@@ -638,7 +661,10 @@ impl AppState {
             .collect();
         let ready = self.local_restore_phase() == DaemonRestorePhase::Ready;
         let present: HashSet<_> = self.inner.workspaces.lock().await.keys().cloned().collect();
-        let by_thread: HashMap<_, _> = observations.values().map(|o| (o.summary.id.as_str(), o)).collect();
+        let by_thread: HashMap<_, _> = observations
+            .values()
+            .map(|o| (o.summary.id.as_str(), o))
+            .collect();
         self.edit_delegations(|l| {
             let now = Utc::now();
             for r in l.reports.iter_mut().filter(|r| r.input_key.is_some()) {
@@ -656,6 +682,27 @@ impl AppState {
                     reports.push(Report { id: Uuid::new_v4().to_string(), bot_id: t.bot_id.clone(), thread: t.thread.clone(), text: format!("Task [{}] has remained open for over seven days. Check progress or declare it finished; tracking remains active.", t.thread), urgent: true, wake: true, created: now, ..Default::default() });
                 }
                 let observation = observations.get(&(t.workspace.clone(), t.thread.clone()));
+                if let Some(o) = observation {
+                    let seq = o.summary.attention.last_agent_activity_seq;
+                    // Metadata edits/read receipts also change updated_at. Only
+                    // actual agent output or a worker turn transition rearms work.
+                    if t.activity_seq != Some(seq) || t.observed_status.as_ref() != Some(&o.summary.status)
+                        || t.turn != o.summary.latest_turn_id
+                    {
+                        let at = o.summary.updated_at.min(now);
+                        t.last_activity = Some(at.max(t.last_activity.unwrap_or(t.created)));
+                        t.activity_seq = Some(seq);
+                        t.observed_status = Some(o.summary.status.clone());
+                    }
+                }
+                if !t.closed && !t.declared_finished && t.admitted && t.waiting.is_none()
+                    && t.quiet_deadline(quiet_seconds).is_some_and(|deadline| now >= deadline)
+                {
+                    t.quiet_since = Some(now);
+                    t.last_state = "went quiet; default inactivity deadline passed; completion unverified".into();
+                    t.changed = now;
+                    reports.push(report_for(t, observation.map(|o| &o.summary), None, true, now));
+                }
                 let definitively_missing = if self.is_cloud_thread(&t.thread) {
                     cloud_known
                 } else {
@@ -669,13 +716,12 @@ impl AppState {
                         t.last_state = "new input request".into();
                     }
                 }
-                if observation.is_none() && definitively_missing && !t.closed {
+                if observation.is_none() && definitively_missing && !t.closed && !t.last_state.starts_with("task deleted") {
                     let since = *t.missing_since.get_or_insert(now);
                     if now - since < ChronoDuration::minutes(2) {
                         continue;
                     }
                     t.active = false;
-                    t.closed = true;
                     t.same_turn_resume = false;
                     t.waiting = None;
                     t.last_state = "task deleted or unavailable in its owning workspace".into();
@@ -699,6 +745,7 @@ impl AppState {
     }
 
     pub(super) async fn poll_delegations(&self, restarting: bool) -> Result<(), DaemonError> {
+        self.poll_job_watches().await?;
         self.poll_observations(restarting).await?;
         self.daily_delegation_summary().await?;
         if let Err(error) = self.escalate_delegations().await {
@@ -707,16 +754,117 @@ impl AppState {
         self.deliver_delegation_wakes().await
     }
 
+    /// Kept independent of report receipts: reading a report never resolves work.
+    pub(super) async fn open_delegations(
+        &self,
+        thread: &str,
+    ) -> Result<HashMap<String, String>, DaemonError> {
+        let owner = self
+            .bot_for_thread(thread)
+            .await
+            .map(|b| b.id)
+            .unwrap_or_else(|| thread.into());
+        let seconds = self.preferences().await.delegation_quiet_seconds;
+        let store = self.delegation_store().await?;
+        let ledger = store.lock().await;
+        Ok(ledger
+            .tasks
+            .iter()
+            .filter(|t| t.bot_id == owner && !t.closed)
+            .map(|t| {
+                let deadline = t
+                    .waiting
+                    .as_ref()
+                    .map(|w| w.deadline)
+                    .or_else(|| t.quiet_deadline(seconds));
+                let state = if t.waiting.is_some() {
+                    "waiting"
+                } else if t.active {
+                    "running"
+                } else {
+                    &t.last_state
+                };
+                (
+                    t.thread.clone(),
+                    format!(
+                        "[Task](falcondeck://thread/{}) · {} · age {}h · due {}",
+                        t.thread,
+                        short(state, 100),
+                        (Utc::now() - t.created).num_hours().max(0),
+                        deadline
+                            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                            .unwrap_or_else(|| "off".into())
+                    ),
+                )
+            })
+            .collect())
+    }
+
+    pub(super) async fn close_delegation(
+        &self,
+        owner_thread: &str,
+        target: &str,
+        abandon: bool,
+    ) -> Result<(), DaemonError> {
+        let owner = self
+            .bot_for_thread(owner_thread)
+            .await
+            .map(|b| b.id)
+            .unwrap_or_else(|| owner_thread.into());
+        let found = self
+            .edit_delegations(|l| {
+                let mut found = false;
+                for task in l
+                    .tasks
+                    .iter_mut()
+                    .filter(|t| t.bot_id == owner && t.thread == target)
+                {
+                    found = true;
+                    task.closed = true;
+                    task.active = false;
+                    task.same_turn_resume = false;
+                    task.waiting = None;
+                    task.changed = Utc::now();
+                    task.last_state = if abandon {
+                        "abandoned by delegator"
+                    } else {
+                        "closed by delegator"
+                    }
+                    .into();
+                }
+                found
+            })
+            .await?;
+        if !found {
+            return Err(DaemonError::BadRequest(
+                "No delegation owned by this thread".into(),
+            ));
+        }
+        self.project_task_waits().await
+    }
+
     pub(super) async fn delegation_context(
         &self,
         thread: &str,
     ) -> Result<(String, Vec<String>), DaemonError> {
+        let mut rows: Vec<_> = self.open_delegations(thread).await?.into_values().collect();
+        rows.sort();
+        let open = if rows.is_empty() {
+            String::new()
+        } else {
+            let total = rows.len();
+            rows.truncate(4);
+            format!(
+                "\n\nOpen delegations ({total}; list parent=self for all):\n{}\n",
+                rows.join("\n")
+            )
+        };
         let Some(bot) = self
             .bot_for_thread(thread)
             .await
             .filter(|b| b.thread_id == thread)
         else {
-            return Ok(Default::default());
+            return Ok((open, Vec::new()));
         };
         let store = match self.delegation_store().await {
             Ok(s) => s,
@@ -760,11 +908,11 @@ impl AppState {
                 ));
             }
             if text.is_empty() {
-                return Ok(Default::default());
+                return Ok((open, ids));
             }
             Ok((
                 format!(
-                    "\n\n## Delegated outcomes (daemon)\n{text}\nAfter reading, call falcondeck_acknowledge_results with report_ids {}. This confirms receipt, not task completion. Do not message sources merely to acknowledge.\n",
+                    "{open}\n\n## Delegated outcomes (daemon)\n{text}\nAfter reading, call falcondeck_acknowledge_results with report_ids {}. This confirms receipt, not task completion. Do not message sources merely to acknowledge.\n",
                     json!(ids)
                 ),
                 ids,
@@ -796,6 +944,7 @@ impl AppState {
                 for r in l
                     .reports
                     .iter_mut()
+                    .chain(l.history.iter_mut())
                     .filter(|r| r.bot_id == bot.id && ids.contains(&r.id))
                 {
                     r.accepted.get_or_insert(now);
@@ -832,8 +981,27 @@ impl AppState {
                 )
             })?;
         self.edit_delegations(|l| {
-            l.reports
-                .retain(|r| r.bot_id != bot.id || !ids.contains(&r.id));
+            let now = Utc::now();
+            for report in l
+                .history
+                .iter_mut()
+                .filter(|r| r.bot_id == bot.id && ids.contains(&r.id))
+            {
+                report.acknowledged.get_or_insert(now);
+                report.retired = Some(now);
+            }
+            let mut pending = Vec::new();
+            for mut report in std::mem::take(&mut l.reports) {
+                if report.bot_id == bot.id && ids.contains(&report.id) {
+                    report.acknowledged = Some(now);
+                    report.retired = Some(now);
+                    l.history.push(report);
+                } else {
+                    pending.push(report);
+                }
+            }
+            l.reports = pending;
+            prune(l, now);
             l.expired.remove(&bot.id);
         })
         .await
@@ -1186,6 +1354,13 @@ impl AppState {
         waiting: Option<TaskWait>,
         actor: Option<&str>,
     ) -> Result<(), DaemonError> {
+        // A completed cancellation cannot race a later wake admission. Never
+        // hold the ledger writer while waiting for provider admission.
+        let _job_gate = if waiting.is_none() {
+            Some(self.job_wake_gate(thread).lock_owned().await)
+        } else {
+            None
+        };
         let found = self
             .edit_delegations(|l| {
                 let mut found = false;
@@ -1194,6 +1369,9 @@ impl AppState {
                     .iter_mut()
                     .filter(|t| t.workspace == workspace && t.thread == thread)
                 {
+                    if waiting.is_some() && t.declared_finished {
+                        continue;
+                    }
                     if t.closed {
                         if waiting.is_none() {
                             found = true;
@@ -1232,6 +1410,14 @@ impl AppState {
                         }
                     }
                 }
+                if waiting.is_none() {
+                    for job in l.jobs.iter_mut().filter(|j| {
+                        j.workspace == workspace && j.thread == thread && j.delivered.is_none()
+                    }) {
+                        job.delivered = Some(Utc::now());
+                        found = true;
+                    }
+                }
                 found
             })
             .await?;
@@ -1258,16 +1444,22 @@ impl AppState {
                     t.workspace == summary.workspace_id && t.thread == summary.id && !t.closed
                 })
                 .and_then(|t| t.waiting.clone());
+            if let Ok(waits) = self.job_waits().await {
+                if let Some(wait) = waits.get(&(summary.workspace_id.clone(), summary.id.clone())) {
+                    summary.attention.task_wait = Some(wait.clone());
+                }
+            }
         }
     }
 
     async fn project_task_waits(&self) -> Result<(), DaemonError> {
         let tasks = self.delegation_store().await?.lock().await.tasks.clone();
-        let waits: HashMap<_, _> = tasks
+        let mut waits: HashMap<_, _> = tasks
             .into_iter()
             .filter(|t| !t.closed)
             .filter_map(|t| t.waiting.map(|w| ((t.workspace, t.thread), w)))
             .collect();
+        waits.extend(self.job_waits().await?);
         let mut changes = Vec::new();
         {
             let mut workspaces = self.inner.workspaces.lock().await;
@@ -1356,7 +1548,10 @@ fn report_for(
                 .map(|s| short(s, 400))
                 .unwrap_or_else(|| "unavailable".into())
         ),
-        wake: urgent || t.delivery == ResultDelivery::Wake && t.closed,
+        delivery: t.delivery,
+        wake: urgent
+            || t.delivery == ResultDelivery::Wake
+                && (t.closed || t.last_state == "turn ended; completion unverified"),
         urgent,
         input_key: (t.last_state == "needs input").then(|| t.input_key.clone().unwrap_or_default()),
         created: now,
@@ -1374,12 +1569,20 @@ fn merge_reports(l: &mut Ledger, reports: Vec<Report>) {
         if r.urgent && r.accepted.is_none() && !r.thread.is_empty() {
             urgent.push(r);
         } else {
-            latest.insert((r.bot_id.clone(), r.thread.clone(), r.recovery), r);
+            if let Some(mut old) =
+                latest.insert((r.bot_id.clone(), r.thread.clone(), r.recovery), r)
+            {
+                old.retired = Some(Utc::now());
+                l.history.push(old);
+            }
         }
     }
     for r in reports {
         let key = (r.bot_id.clone(), r.thread.clone(), r.recovery);
-        latest.remove(&key);
+        if let Some(mut old) = latest.remove(&key) {
+            old.retired = Some(Utc::now());
+            l.history.push(old);
+        }
         if r.urgent && r.accepted.is_none() && !r.thread.is_empty() {
             urgent.push(r);
         } else {
@@ -1395,12 +1598,18 @@ fn push_report(l: &mut Ledger, report: Report) {
 
 fn prune(l: &mut Ledger, now: DateTime<Utc>) {
     let cutoff = now - ChronoDuration::days(RETENTION_DAYS);
+    l.history
+        .retain(|r| r.retired.unwrap_or(r.created) >= cutoff);
+    l.jobs.retain(|j| j.delivered.is_none_or(|at| at >= cutoff));
     let mut dropped = HashMap::<String, usize>::new();
     l.reports.retain(|r| {
         let keep = r.created >= cutoff
             || r.recovery && r.accepted.is_none()
             || r.urgent && r.accepted.is_none() && !r.escalated;
         if !keep {
+            let mut old = r.clone();
+            old.retired = Some(now);
+            l.history.push(old);
             *dropped.entry(r.bot_id.clone()).or_default() += 1;
         }
         keep
@@ -1434,6 +1643,9 @@ fn prune(l: &mut Ledger, now: DateTime<Utc>) {
         l.reports.retain(|r| {
             let retained = r.bot_id != bot || keep.contains(&r.id) || r.accepted.is_none();
             if !retained {
+                let mut old = r.clone();
+                old.retired = Some(now);
+                l.history.push(old);
                 *dropped.entry(r.bot_id.clone()).or_default() += 1;
             }
             retained
@@ -1465,14 +1677,15 @@ fn observe(
         && !t.closed
     {
         t.deadline_reported = true;
+        t.quiet_since = Some(now);
         t.waiting = None;
         t.active = false;
-        t.closed = true;
         t.same_turn_resume = false;
         urgent = true;
-        Some("waiting deadline passed; tracking stopped until explicit follow-up".to_string())
+        Some("waiting deadline passed; work remains open".to_string())
     } else if restarting && t.active && !t.closed {
         t.active = false;
+        t.closed = t.declared_finished;
         t.last_state =
             "interrupted by daemon restart; outcome unknown; inspect native recovery state".into();
         urgent = true;
@@ -1506,6 +1719,17 @@ fn observe(
             t.waiting = None;
             t.resumed = true;
         }
+        if !busy
+            && !t.active
+            && !t.closed
+            && !t.declared_finished
+            && t.waiting.is_none()
+            && (t.turn != s.latest_turn_id || fresh_reply)
+        {
+            t.active = true;
+            t.resumed = true;
+            t.turn = s.latest_turn_id.clone();
+        }
         if busy {
             if !t.active {
                 t.resumed = t.last_state != "not dispatched yet";
@@ -1529,7 +1753,10 @@ fn observe(
             Some("needs input".into())
         } else if s.status == ThreadStatus::Error && !t.closed {
             t.active = false;
-            t.closed = true;
+            t.closed = t.declared_finished;
+            if t.last_state.starts_with("failed/interrupted:") {
+                return None;
+            }
             t.same_turn_resume = false;
             t.waiting = None;
             urgent = true;
@@ -1551,8 +1778,8 @@ fn observe(
                 t.waiting_notified = true;
                 Some("waiting (declared or background work pending)".into())
             } else {
-                t.closed = true;
-                t.same_turn_resume = !t.declared_finished;
+                t.closed = t.declared_finished;
+                t.same_turn_resume = false;
                 Some(if t.declared_finished {
                     "finished (declared by task)".into()
                 } else {
@@ -1570,7 +1797,7 @@ fn observe(
         t.changed = now;
         let mut report = report_for(t, summary, reply, urgent, now);
         // Waiting is informational, not another paid completion each poll.
-        if !urgent && was_waiting && !t.closed {
+        if !urgent && was_waiting && t.waiting.is_some() {
             report.wake = false;
         }
         report
@@ -1678,6 +1905,252 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unverified_ack_keeps_open_default_deadline_and_explicit_close() {
+        let (app, _temp) = fixture().await;
+        let b = bot(&app).await;
+        let summary = target(&app).await;
+        track(&app, &b, &summary, ResultDelivery::Batch).await;
+        status(&app, ThreadStatus::Idle).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(
+            report_list(&app).await[0]
+                .text
+                .contains("completion unverified")
+        );
+        ack(&app).await;
+        assert!(report_list(&app).await.is_empty());
+        let (context, ids) = app.delegation_context("thread-1").await.unwrap();
+        assert!(ids.is_empty());
+        assert!(
+            context.contains("Open delegations") && context.contains("falcondeck://thread/reused")
+        );
+        let listing = app
+            .invoke_extension_tool(call(
+                "falcondeck_list_threads",
+                json!({"parent":"self","detail":"brief"}),
+            ))
+            .await
+            .unwrap();
+        assert!(serde_json::to_string(&listing).unwrap().contains("reused"));
+        let old = Utc::now() - ChronoDuration::hours(5);
+        app.with_thread_mut("workspace-1", "reused", |s| s.updated_at = old)
+            .await
+            .unwrap();
+        app.edit_delegations(|l| {
+            l.tasks[0].last_activity = Some(old);
+        })
+        .await
+        .unwrap();
+        app.poll_observations(false).await.unwrap();
+        assert!(
+            report_list(&app)
+                .await
+                .iter()
+                .any(|r| r.wake && r.text.contains("went quiet"))
+        );
+        ack(&app).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(
+            report_list(&app).await.is_empty(),
+            "quiet deadline fires once until new activity"
+        );
+        app.invoke_extension_tool(call(
+            "falcondeck_close_delegation",
+            json!({"thread_id":"reused"}),
+        ))
+        .await
+        .unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+        let store = app.delegation_store().await.unwrap();
+        let ledger = store.lock().await;
+        assert!(ledger.history.iter().all(|r| r.acknowledged.is_some()));
+        assert!(ledger.history.iter().any(
+            |r| r.delivery == ResultDelivery::Batch && r.text.contains("completion unverified")
+        ));
+        let restored = decode_ledger(&serde_json::to_vec(&*ledger).unwrap()).unwrap();
+        assert!(restored.history == ledger.history);
+    }
+
+    #[tokio::test]
+    async fn metadata_does_not_extend_silence_but_worker_activity_does() {
+        let (app, _temp) = fixture().await;
+        let b = bot(&app).await;
+        let summary = target(&app).await;
+        track(&app, &b, &summary, ResultDelivery::Batch).await;
+        status(&app, ThreadStatus::Idle).await;
+        app.poll_observations(false).await.unwrap();
+        ack(&app).await;
+        app.edit_delegations(|l| {
+            l.tasks[0].last_activity = Some(Utc::now() - ChronoDuration::hours(5))
+        })
+        .await
+        .unwrap();
+        app.with_thread_mut("workspace-1", "reused", |s| {
+            s.title = "Metadata change".into()
+        })
+        .await
+        .unwrap();
+        app.poll_observations(false).await.unwrap();
+        assert!(
+            report_list(&app)
+                .await
+                .iter()
+                .any(|r| r.text.contains("went quiet"))
+        );
+        ack(&app).await;
+        app.edit_delegations(|l| {
+            l.tasks[0].quiet_since = Some(Utc::now() - ChronoDuration::hours(5))
+        })
+        .await
+        .unwrap();
+        app.with_thread_mut("workspace-1", "reused", |s| {
+            s.attention.last_agent_activity_seq += 1
+        })
+        .await
+        .unwrap();
+        app.poll_observations(false).await.unwrap();
+        assert!(report_list(&app).await.is_empty());
+        // A fast turn can start and finish between monitor ticks; it reports once.
+        app.with_thread_mut("workspace-1", "reused", |s| {
+            s.latest_turn_id = Some("fast-turn".into())
+        })
+        .await
+        .unwrap();
+        app.poll_observations(false).await.unwrap();
+        assert_eq!(report_list(&app).await.len(), 1);
+        ack(&app).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(report_list(&app).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_wait_falls_back_to_recurring_default_until_explicit_close() {
+        let (app, _temp) = fixture().await;
+        let b = bot(&app).await;
+        let summary = target(&app).await;
+        track(&app, &b, &summary, ResultDelivery::Batch).await;
+        let old = Utc::now() - ChronoDuration::hours(10);
+        app.with_thread_mut("workspace-1", "reused", |s| {
+            s.status = ThreadStatus::Idle;
+            s.updated_at = old;
+        })
+        .await
+        .unwrap();
+        app.edit_delegations(|l| {
+            l.tasks[0].last_activity = Some(old);
+            l.tasks[0].waiting = Some(TaskWait {
+                reason: "disk hold".into(),
+                deadline: Utc::now() - ChronoDuration::seconds(1),
+            });
+        })
+        .await
+        .unwrap();
+        app.poll_observations(false).await.unwrap();
+        assert!(report_list(&app).await.iter().any(|r| {
+            r.urgent
+                && r.text
+                    .contains("waiting deadline passed; work remains open")
+        }));
+        ack(&app).await;
+        assert!(!app.open_delegations("thread-1").await.unwrap().is_empty());
+        for _ in 0..2 {
+            app.edit_delegations(|l| {
+                l.tasks[0].quiet_since = Some(Utc::now() - ChronoDuration::hours(5))
+            })
+            .await
+            .unwrap();
+            app.poll_observations(false).await.unwrap();
+            assert!(
+                report_list(&app)
+                    .await
+                    .iter()
+                    .any(|r| r.wake && r.text.contains("went quiet"))
+            );
+            ack(&app).await;
+            app.poll_observations(false).await.unwrap();
+            assert!(report_list(&app).await.is_empty());
+        }
+        app.close_delegation("thread-1", "reused", true)
+            .await
+            .unwrap();
+        app.poll_observations(false).await.unwrap();
+        assert!(report_list(&app).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_deadline_off_switch_and_explicit_wait_override() {
+        let (app, _temp) = fixture().await;
+        let b = bot(&app).await;
+        let s = target(&app).await;
+        track(&app, &b, &s, ResultDelivery::Batch).await;
+        let old = Utc::now() - ChronoDuration::hours(5);
+        app.with_thread_mut("workspace-1", "reused", |s| {
+            s.status = ThreadStatus::Idle;
+            s.updated_at = old;
+        })
+        .await
+        .unwrap();
+        app.edit_delegations(|l| l.tasks[0].last_activity = Some(old))
+            .await
+            .unwrap();
+        app.inner.preferences.lock().await.delegation_quiet_seconds = 0;
+        app.poll_observations(false).await.unwrap();
+        assert!(!report_list(&app).await.iter().any(|r| r.urgent));
+        ack(&app).await;
+        app.inner.preferences.lock().await.delegation_quiet_seconds = 14400;
+        app.declare_task_wait(
+            "workspace-1",
+            "reused",
+            Some(TaskWait {
+                reason: "job".into(),
+                deadline: Utc::now() + ChronoDuration::hours(1),
+            }),
+        )
+        .await
+        .unwrap();
+        app.poll_observations(false).await.unwrap();
+        assert!(!report_list(&app).await.iter().any(|r| r.urgent));
+        assert!(
+            app.close_delegation("unrelated", "reused", true)
+                .await
+                .is_err()
+        );
+        app.close_delegation("thread-1", "reused", true)
+            .await
+            .unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn superseded_and_acknowledged_outcomes_remain_auditable_seven_days() {
+        let now = Utc::now();
+        let original = Report {
+            id: "original".into(),
+            bot_id: "bot".into(),
+            thread: "task".into(),
+            created: now,
+            ..Default::default()
+        };
+        let mut ledger = Ledger::default();
+        push_report(&mut ledger, original);
+        push_report(
+            &mut ledger,
+            Report {
+                id: "replacement".into(),
+                bot_id: "bot".into(),
+                thread: "task".into(),
+                created: now,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ledger.history[0].id, "original");
+        prune(&mut ledger, now + ChronoDuration::days(6));
+        assert_eq!(ledger.history.len(), 1);
+        prune(&mut ledger, now + ChronoDuration::days(8));
+        assert!(!ledger.history.iter().any(|r| r.id == "original"));
+    }
+
+    #[tokio::test]
     async fn background_wait_same_turn_wake_reports_final_reply() {
         let (app, _temp) = fixture().await;
         let b = bot(&app).await;
@@ -1776,7 +2249,7 @@ mod tests {
             deadline: Utc::now() - ChronoDuration::seconds(1),
         });
         assert!(observe(&mut t, None, None, false, Utc::now()).unwrap().wake);
-        assert!(t.closed && t.waiting.is_none());
+        assert!(!t.closed && t.waiting.is_none());
         assert!(observe(&mut t, None, None, true, Utc::now()).is_none());
     }
 
@@ -1890,6 +2363,83 @@ mod tests {
         assert_eq!(l.tasks.len(), 2);
         assert_eq!(l.tasks[0].delivery, ResultDelivery::Wake);
         assert!(l.tasks.iter().all(|t| t.waiting.as_ref() == Some(&wait)));
+    }
+
+    async fn finished_then_error() -> (AppState, tempfile::TempDir) {
+        let (app, temp) = fixture().await;
+        let owner = bot(&app).await;
+        let worker = target(&app).await;
+        track(&app, &owner, &worker, ResultDelivery::Batch).await;
+        app.declare_task_wait("workspace-1", "reused", None)
+            .await
+            .unwrap();
+        status(&app, ThreadStatus::Error).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+        assert!(
+            report_list(&app)
+                .await
+                .iter()
+                .any(|r| r.urgent && r.text.contains("failed/interrupted"))
+        );
+        (app, temp)
+    }
+
+    #[tokio::test]
+    async fn finished_then_error_stays_closed_after_acknowledgement() {
+        let (app, _temp) = finished_then_error().await;
+        ack(&app).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+        assert!(report_list(&app).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finished_then_error_stays_closed_after_restart() {
+        // Restart may happen before the monitor ever observes the Error.
+        for observed in [false, true] {
+            let (app, _temp) = fixture().await;
+            let owner = bot(&app).await;
+            let worker = target(&app).await;
+            track(&app, &owner, &worker, ResultDelivery::Batch).await;
+            app.declare_task_wait("workspace-1", "reused", None)
+                .await
+                .unwrap();
+            status(&app, ThreadStatus::Error).await;
+            if observed {
+                app.poll_observations(false).await.unwrap();
+                ack(&app).await;
+            }
+            let restored = AppState::new_with_state_path(
+                "test".into(),
+                HashMap::new(),
+                app.inner.state_path.clone(),
+            );
+            *restored.inner.preferences.lock().await = app.preferences().await;
+            *restored.inner.workspaces.lock().await =
+                std::mem::take(&mut *app.inner.workspaces.lock().await);
+            restored.poll_observations(true).await.unwrap();
+            assert!(
+                restored
+                    .open_delegations("thread-1")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            ack(&restored).await;
+            restored.poll_observations(false).await.unwrap();
+            assert!(report_list(&restored).await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_then_error_stays_closed_when_worker_later_becomes_idle() {
+        let (app, _temp) = finished_then_error().await;
+        ack(&app).await;
+        status(&app, ThreadStatus::Idle).await;
+        app.poll_observations(false).await.unwrap();
+        assert!(app.open_delegations("thread-1").await.unwrap().is_empty());
+        assert!(report_list(&app).await.is_empty());
     }
 
     #[tokio::test]
@@ -2084,7 +2634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleted_thread_is_terminal_and_cannot_generate_daily_wakes_forever() {
+    async fn deleted_thread_stays_open_until_the_delegator_closes_it() {
         let (app, _temp) = fixture().await;
         let b = bot(&app).await;
         let s = target(&app).await;
@@ -2117,6 +2667,10 @@ mod tests {
         app.poll_observations(false).await.unwrap();
         assert!(report_list(&app).await[0].text.contains("deleted"));
         ack(&app).await;
+        assert!(!app.open_delegations("thread-1").await.unwrap().is_empty());
+        app.close_delegation("thread-1", "reused", true)
+            .await
+            .unwrap();
         for _ in 0..3 {
             app.daily_delegation_summary().await.unwrap();
             app.poll_observations(true).await.unwrap();
@@ -2454,6 +3008,9 @@ mod tests {
         let b = bot(&app).await;
         let s = target(&app).await;
         track(&app, &b, &s, ResultDelivery::Batch).await;
+        app.declare_task_wait("workspace-1", "reused", None)
+            .await
+            .unwrap();
         status(&app, ThreadStatus::Idle).await;
         app.poll_observations(false).await.unwrap();
         app.edit_delegations(|l| {
@@ -2769,14 +3326,15 @@ mod tests {
         status(&app, ThreadStatus::Running).await;
         app.poll_observations(false).await.unwrap();
         app.escalate_delegations().await.unwrap();
-        assert!(app
-            .delegation_store()
-            .await
-            .unwrap()
-            .lock()
-            .await
-            .alerts
-            .is_empty());
+        assert!(
+            app.delegation_store()
+                .await
+                .unwrap()
+                .lock()
+                .await
+                .alerts
+                .is_empty()
+        );
     }
 
     #[tokio::test]

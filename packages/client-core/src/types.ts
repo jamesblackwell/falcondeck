@@ -442,6 +442,8 @@ export type FalconDeckPreferences = {
   auto_resume_interrupted_sessions?: boolean;
   /** Active child threads one agent or bot may have at once (1–20). Older daemons omit this. */
   max_agent_children?: number;
+  /** Tracked-work inactivity deadline in seconds; zero disables it. */
+  delegation_quiet_seconds?: number;
   /** Context size at which Claude conversations compact (100K–1M). Older daemons omit this. */
   claude_autocompact_tokens?: number;
   /** Context size at which Codex conversations compact; null or absent uses Codex's own default. */
@@ -924,6 +926,8 @@ export type UpdatePreferencesPayload = {
   auto_resume_interrupted_sessions?: boolean;
   /** Integer 1–20; the daemon rejects other values. */
   max_agent_children?: number;
+  /** Tracked-work inactivity deadline in seconds; zero disables it. */
+  delegation_quiet_seconds?: number;
   /** Integer 100000–1000000; the daemon rejects other values. */
   claude_autocompact_tokens?: number;
   /** Integer 100000–1000000, or null to restore Codex's own default. */

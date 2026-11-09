@@ -1371,3 +1371,16 @@ describe("idle bot compaction preference", () => {
     expect(normalizePreferences({ bot_idle_compaction_enabled: true }).bot_idle_compaction_enabled).toBe(true);
   });
 });
+
+
+describe("delegation inactivity preference", () => {
+  it("defaults to four hours and preserves the off switch", () => {
+    expect(normalizePreferences({}).delegation_quiet_seconds).toBe(14400);
+    for (const seconds of [0, 60, 14400]) {
+      expect(normalizePreferences({ delegation_quiet_seconds: seconds }).delegation_quiet_seconds).toBe(seconds);
+    }
+    for (const seconds of [-1, 1.5, "0", null, 4294967296]) {
+      expect(normalizePreferences({ delegation_quiet_seconds: seconds }).delegation_quiet_seconds).toBe(14400);
+    }
+  });
+});
