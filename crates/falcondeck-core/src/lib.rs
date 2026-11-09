@@ -62,6 +62,8 @@ fn default_max_agent_children() -> u32 {
     DEFAULT_MAX_AGENT_CHILDREN
 }
 
+fn default_delegation_quiet_seconds() -> u32 { 4 * 60 * 60 }
+
 /// Default for `FalconDeckPreferences::claude_autocompact_tokens`.
 pub const DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS: u32 = 200_000;
 /// Smallest accepted auto-compact point (Claude Code's own floor).
@@ -127,6 +129,9 @@ pub struct FalconDeckPreferences {
     /// Active child threads one agent or bot may have at once.
     #[serde(default = "default_max_agent_children")]
     pub max_agent_children: u32,
+    /// Default inactivity deadline for tracked work, in seconds; zero disables it.
+    #[serde(default = "default_delegation_quiet_seconds")]
+    pub delegation_quiet_seconds: u32,
     /// Context size at which Claude conversations compact. Explicit `[1m]`
     /// model choices ignore it and keep the full window.
     #[serde(default = "default_claude_autocompact_tokens")]
@@ -194,6 +199,7 @@ impl Default for FalconDeckPreferences {
             version: default_preferences_version(),
             auto_resume_interrupted_sessions: true,
             max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
+            delegation_quiet_seconds: default_delegation_quiet_seconds(),
             claude_autocompact_tokens: DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
             codex_autocompact_tokens: None,
             bot_idle_compaction_enabled: true,
@@ -745,6 +751,9 @@ pub struct UpdatePreferencesRequest {
     /// `MIN_MAX_AGENT_CHILDREN..=MAX_MAX_AGENT_CHILDREN`.
     #[serde(default)]
     pub max_agent_children: Option<u32>,
+    /// Update the tracked-work inactivity deadline; zero disables it.
+    #[serde(default)]
+    pub delegation_quiet_seconds: Option<u32>,
     /// Optional Claude auto-compact point; accepted range is
     /// `MIN_AUTOCOMPACT_TOKENS..=MAX_AUTOCOMPACT_TOKENS`.
     #[serde(default)]

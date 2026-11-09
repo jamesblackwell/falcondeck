@@ -421,6 +421,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
   auto_resume_interrupted_sessions: false,
   max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
+  delegation_quiet_seconds: 14400,
   claude_autocompact_tokens: DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
   codex_autocompact_tokens: null,
   bot_idle_compaction_enabled: true,
@@ -2431,6 +2432,11 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       raw.max_agent_children <= MAX_MAX_AGENT_CHILDREN
         ? raw.max_agent_children
         : DEFAULT_MAX_AGENT_CHILDREN,
+    delegation_quiet_seconds:
+      typeof raw.delegation_quiet_seconds === "number" &&
+      Number.isInteger(raw.delegation_quiet_seconds) &&
+      raw.delegation_quiet_seconds >= 0 && raw.delegation_quiet_seconds <= 4294967295
+        ? raw.delegation_quiet_seconds : 14400,
     claude_autocompact_tokens: isAutocompactTokens(raw.claude_autocompact_tokens)
       ? raw.claude_autocompact_tokens
       : DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,

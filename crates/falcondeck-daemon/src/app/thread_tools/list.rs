@@ -99,7 +99,7 @@ pub(super) fn schema() -> Value {
         "updated_since": {"type":"string", "description":"RFC 3339, YYYY-MM-DD, or an age like 30m, 24h, 7d."},
         "updated_before": {"type":"string"},
         "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Case-insensitive literal match on title, id, and message excerpts."},
-        "parent": {"type":"string", "minLength":1, "description":"Only threads created by this thread id; \"self\" for your own."},
+        "parent": {"type":"string", "minLength":1, "description":"Threads created by this parent; self also includes open message delegations."},
         "provider": {"type":"string", "minLength":1},
         "folder": {"type":"string", "minLength":1, "description":"Project folder name or id."},
         "pinned": {"type":"boolean"},
@@ -252,6 +252,8 @@ pub(super) async fn list(
         None
     };
 
+    let open_delegations = app.open_delegations(parent.as_deref().unwrap_or(caller)).await?;
+
     let folders: Vec<_> = app
         .preferences()
         .await
@@ -364,7 +366,7 @@ pub(super) async fn list(
                     && since.is_none_or(|since| t.updated_at >= since)
                     && before.is_none_or(|before| t.updated_at < before)
                     && parent.as_deref().is_none_or(|parent| {
-                        matches!(&t.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent || parent_bot.as_ref().is_some_and(|bot| bot.owns_thread(parent_thread_id)))
+                        open_delegations.contains_key(&t.id) || matches!(&t.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent || parent_bot.as_ref().is_some_and(|bot| bot.owns_thread(parent_thread_id)))
                     })
                     && folder_filter
                         .as_deref()
@@ -529,6 +531,9 @@ pub(super) async fn list(
                 excerpts: args.detail == Detail::Normal,
             };
             let mut text = glance::row(&summary, &glance, &cx, &[]);
+            if parent.is_some() {
+                if let Some(open) = open_delegations.get(&summary.id) { text.push_str(&format!("  Open: {open}\n")); }
+            }
             // Room for the footer, which carries the next offset.
             let room = cap.saturating_sub(markdown.chars().count() + 120);
             if text.chars().count() > room {
