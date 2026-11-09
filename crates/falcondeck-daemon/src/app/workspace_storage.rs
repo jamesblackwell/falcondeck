@@ -400,11 +400,21 @@ impl AppState {
             let file = Path::new(path).join(name);
             let metadata = match tokio::fs::symlink_metadata(&file).await {
                 Ok(m) => m,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && omitted.contains(name) => {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) && omitted.contains(name) =>
+                {
                     // Sparse omissions are not working-tree deletions or activity.
                     continue;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
                     // A real deletion has no inode. Its nearest surviving
                     // ancestor records removal of a whole source directory.
                     let mut parent = file.parent();
@@ -417,7 +427,13 @@ impl AppState {
                             })?;
                         match tokio::fs::symlink_metadata(directory).await {
                             Ok(m) => break m,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            Err(e)
+                                if matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::NotFound
+                                        | std::io::ErrorKind::NotADirectory
+                                ) =>
+                            {
                                 parent = directory.parent()
                             }
                             Err(e) => return Err(e.into()),

@@ -10247,19 +10247,24 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn storage_recent_deleted_source_directory_is_protected() {
-        let f = storage_fixture().await;
-        let path = std::path::Path::new(&f.variant.path);
-        std::fs::create_dir_all(path.join("removed/deep")).unwrap();
-        std::fs::write(path.join("removed/deep/data.txt"), "tracked source").unwrap();
-        VariantFixture::git_at(path, &["add", "removed"]);
-        VariantFixture::git_at(path, &["commit", "-m", "source tree"]);
-        age_storage_tree(path);
-        age_storage_tree(&f.project.join(".git"));
-        std::fs::remove_dir_all(path.join("removed")).unwrap();
-        let report = f.app.storage_report().await.unwrap();
-        assert!(report.variants[0].cache_blocked.is_some());
-        f.app.storage_cleanup(true).await.unwrap();
-        assert!(path.join("node_modules").exists());
+    async fn storage_recent_deleted_or_replaced_source_directory_is_protected() {
+        for replacement in [false, true] {
+            let f = storage_fixture().await;
+            let path = std::path::Path::new(&f.variant.path);
+            std::fs::create_dir_all(path.join("removed/deep")).unwrap();
+            std::fs::write(path.join("removed/deep/data.txt"), "tracked source").unwrap();
+            VariantFixture::git_at(path, &["add", "removed"]);
+            VariantFixture::git_at(path, &["commit", "-m", "source tree"]);
+            age_storage_tree(path);
+            age_storage_tree(&f.project.join(".git"));
+            std::fs::remove_dir_all(path.join("removed")).unwrap();
+            if replacement {
+                std::fs::write(path.join("removed"), "replacement source file").unwrap();
+            }
+            let report = f.app.storage_report().await.unwrap();
+            assert!(report.variants[0].cache_blocked.is_some());
+            f.app.storage_cleanup(true).await.unwrap();
+            assert!(path.join("node_modules").exists());
+        }
     }
 }
