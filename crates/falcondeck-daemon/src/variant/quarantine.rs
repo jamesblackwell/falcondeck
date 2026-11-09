@@ -1657,14 +1657,26 @@ mod tests {
         );
         std::fs::remove_dir_all(&other).unwrap();
         std::fs::create_dir(&other).unwrap();
-        git(&other, &["init", "-b", "independent"]);
+        let independent = f._temp.path().join("independent.git");
+        git(
+            &other,
+            &[
+                "init",
+                "--separate-git-dir",
+                independent.to_str().unwrap(),
+                "-b",
+                "independent",
+            ],
+        );
         let before = git(&other, &["rev-parse", "--absolute-git-dir"]);
         let path = Path::new(&f.variant.path);
         let saved = snapshot::create(&f.variant.path, &f.variant.slug)
             .await
             .unwrap();
         let r = stage(project, &f.variant, path, Some(saved)).await.unwrap();
-        assert!(other.join(".git").is_dir());
+        // A .git file can be overwritten by global worktree repair; a
+        // directory would hide the regression by making the write fail.
+        assert!(other.join(".git").is_file());
         assert_eq!(git(&other, &["rev-parse", "--absolute-git-dir"]), before);
         assert_eq!(
             git(&r.path, &["rev-parse", "--show-toplevel"]),
