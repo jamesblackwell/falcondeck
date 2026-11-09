@@ -279,6 +279,34 @@ hours, so anomalous takes also append that line to
 `~/.falcondeck/logs/dictation-capture.log` (mode 0600, rotated to `.1` past
 256 KB). No audio content is logged.
 
+### Missing or empty capture files
+
+The “microphone did not save any audio” fallback means the file-output delegate
+finished with a missing or zero-byte file (including a failed file-size lookup).
+It does not by itself mean that microphone access was denied. Capture checks
+microphone authorization before opening the input; start failures and takes
+released before the microphone is ready have separate messages.
+
+Empty captures first inspect the delegate error and its underlying errors.
+`AVErrorDiskFull` (`AVFoundationErrorDomain`, `-11807`), Cocoa write-out-of-space,
+and POSIX ENOSPC/EDQUOT name insufficient disk space in the toast. Device
+disconnect, input-in-use and microphone authorization errors also have specific
+messages. The shared error mapper is used by the Tauri desktop and native pilot.
+Do not infer disk-full from the current free-byte count alone: the capture
+framework has its own minimum free-space check, and free space can change
+between the failure and diagnosis.
+
+Failed or empty Tauri captures log file bytes, elapsed seconds and the bounded
+error domain/code chain to the capture log above before clearing the empty take.
+These diagnostics exclude NSError descriptions, userInfo, paths and audio.
+Logging is best-effort and may itself fail on a full disk. Diagnose existing
+installations with a narrowly filtered unified log for the desktop process,
+`com.apple.coremedia` and `com.apple.cmio`: `AVErrorDiskFull` together with
+`curFreeBytesOnVolume <= ... mMinFreeSpace` identifies a storage refusal before
+the recorder creates its file. Free space on the volume holding the macOS
+temporary directory, then retry; resetting microphone permissions does not
+resolve this condition. Nonempty failed takes keep the existing recovery flow.
+
 ## Optional Parakeet
 
 Settings → Voice → Transcription has three engines: Apple Speech (default),

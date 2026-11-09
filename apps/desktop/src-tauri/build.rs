@@ -26,6 +26,7 @@ fn main() {
         println!("cargo:rerun-if-changed=src/macos_sounds.m");
         println!("cargo:rerun-if-changed=src/macos_computer_use.m");
         println!("cargo:rerun-if-changed=src/dictation_events.h");
+        println!("cargo:rerun-if-changed=src/dictation_capture_error.h");
     }
 
     tauri_build::build()

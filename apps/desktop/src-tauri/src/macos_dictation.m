@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <os/log.h>
 #import "dictation_events.h"
+#import "dictation_capture_error.h"
 #include <math.h>
 #include <string.h>
 #include <unistd.h>
@@ -2135,14 +2136,32 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       FDEmit(FDEventCancelled, @"");
       return;
     }
+    NSError *fileError = nil;
     NSNumber *fileSize = url
-        ? [[[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil]
+        ? [[[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:&fileError]
               objectForKey:NSFileSize]
         : nil;
+    if (error || !url || fileSize.unsignedLongLongValue == 0) {
+      // Never log NSError descriptions/userInfo: they may contain local paths.
+      NSError *failure = error ?: fileError;
+      NSMutableArray<NSString *> *codes = [NSMutableArray array];
+      for (NSUInteger depth = 0; failure && depth < 8; depth++) {
+        [codes addObject:[NSString stringWithFormat:@"%@:%ld", failure.domain,
+                                                   (long)failure.code]];
+        failure = failure.userInfo[NSUnderlyingErrorKey];
+      }
+      NSString *line = [NSString stringWithFormat:
+          @"%@ capture-failed bytes=%llu elapsedSeconds=%.2f errors=%@",
+          [NSISO8601DateFormatter.new stringFromDate:NSDate.date],
+          fileSize.unsignedLongLongValue, self.captureElapsedSeconds,
+          [codes componentsJoinedByString:@","]];
+      os_log_error(FDCaptureLog(), "%{public}s", line.UTF8String);
+      FDAppendCaptureAnomaly(line);
+    }
     if (!url || fileSize.unsignedLongLongValue == 0) {
       if (url) [NSFileManager.defaultManager removeItemAtURL:url error:nil];
       [self setRetainedRecordingURL:nil provider:0];
-      FDEmit(FDEventFailed, @"The microphone did not save any audio. Try recording again.");
+      FDEmit(FDEventFailed, FDEmptyCaptureMessage(error ?: fileError));
       return;
     }
     if (error) {
@@ -3400,6 +3419,38 @@ double fd_dictation_retained_recording_duration_seconds(void) {
     dispatch_sync(dispatch_get_main_queue(), read);
   }
   return isfinite(duration) && duration > 0 ? duration : 0;
+}
+
+// Pure error mapping: never opens a microphone or reads a real recording.
+bool fd_dictation_test_capture_failure_contract(void) {
+  @autoreleasepool {
+    NSArray<NSArray *> *cases = @[
+      @[AVFoundationErrorDomain, @(AVErrorDiskFull), @"disk space"],
+      @[NSCocoaErrorDomain, @(NSFileWriteOutOfSpaceError), @"disk space"],
+      @[NSPOSIXErrorDomain, @(ENOSPC), @"disk space"],
+      @[NSPOSIXErrorDomain, @(EDQUOT), @"disk space"],
+      @[AVFoundationErrorDomain, @(AVErrorApplicationIsNotAuthorizedToUseDevice), @"Microphone access is off"],
+      @[AVFoundationErrorDomain, @(AVErrorDeviceWasDisconnected), @"disconnected"],
+      @[AVFoundationErrorDomain, @(AVErrorDeviceNotConnected), @"disconnected"],
+      @[AVFoundationErrorDomain, @(AVErrorDeviceInUseByAnotherApplication), @"another app"],
+    ];
+    for (NSArray *test in cases) {
+      NSError *error = [NSError errorWithDomain:test[0] code:[test[1] integerValue]
+                                      userInfo:nil];
+      NSError *wrapped = [NSError errorWithDomain:AVFoundationErrorDomain
+          code:AVErrorUnknown userInfo:@{NSUnderlyingErrorKey: error}];
+      if (![FDEmptyCaptureMessage(error) containsString:test[2]] ||
+          ![FDEmptyCaptureMessage(wrapped) containsString:test[2]]) return false;
+    }
+    NSString *fallback = FDEmptyCaptureMessage(nil);
+    NSError *unknown = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO
+        userInfo:@{NSLocalizedDescriptionKey: @"private-path-must-not-be-shown"}];
+    NSError *wrongDomain = [NSError errorWithDomain:NSPOSIXErrorDomain
+        code:AVErrorDiskFull userInfo:nil];
+    return [fallback containsString:@"did not save any audio"] &&
+        [FDEmptyCaptureMessage(unknown) isEqualToString:fallback] &&
+        [FDEmptyCaptureMessage(wrongDomain) isEqualToString:fallback];
+  }
 }
 
 // No microphone or permissions: verify that data already written to CAF is

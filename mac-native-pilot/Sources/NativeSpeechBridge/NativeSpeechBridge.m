@@ -7,6 +7,7 @@
 #import <objc/runtime.h>
 #import <os/log.h>
 #import "dictation_events.h"
+#import "../../../apps/desktop/src-tauri/src/dictation_capture_error.h"
 #include <math.h>
 #include <string.h>
 #include <unistd.h>
@@ -1598,7 +1599,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     if (!url || fileSize.unsignedLongLongValue == 0) {
       if (url) [NSFileManager.defaultManager removeItemAtURL:url error:nil];
       [self setRetainedRecordingURL:nil provider:0];
-      FDEmit(FDEventFailed, @"The microphone did not save any audio. Try recording again.");
+      FDEmit(FDEventFailed, FDEmptyCaptureMessage(error));
       return;
     }
     if (error) {
