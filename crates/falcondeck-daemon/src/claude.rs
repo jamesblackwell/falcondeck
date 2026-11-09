@@ -42,6 +42,7 @@ use falcondeck_core::ToolCallDetail;
 
 mod auth_cache;
 mod history;
+mod model_catalog;
 #[cfg(test)]
 mod hotpath_bench;
 mod stream;
@@ -262,7 +263,7 @@ impl ClaudeRuntime {
 
         let (account, models) = tokio::join!(
             auth_cache::startup_auth_status(&resolved.executable),
-            list_models()
+            model_catalog::list_models_for_bin(&resolved.executable)
         );
         let collaboration_modes = Vec::new();
         let capabilities = default_capabilities();
@@ -936,7 +937,7 @@ impl ClaudeRuntime {
         let resolved = resolve_agent_binary("claude", &self.claude_bin);
         let (account, models) = tokio::join!(
             auth_cache::refresh_auth_status(&resolved.executable),
-            list_models()
+            model_catalog::list_models_for_bin(&resolved.executable)
         );
         ClaudeProviderMetadata {
             account,
