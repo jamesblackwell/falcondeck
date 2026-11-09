@@ -381,6 +381,8 @@ struct InnerState {
     delegation_monitor_started: AtomicBool,
     delegation_persistence: Mutex<()>,
     delegation_sends: StdMutex<HashSet<String>>,
+    /// Serializes job wake admission with a worker's finished declaration.
+    job_wake_gates: StdMutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     /// Legacy session-local child watches.
     agent_spawn_watches: StdMutex<Option<HashMap<String, thread_tools::ChildWatch>>>,
     /// Active realtime transcript parts keyed by (thread id, provider role).
@@ -1236,6 +1238,7 @@ impl AppState {
                 delegation_monitor_started: AtomicBool::new(false),
                 delegation_persistence: Mutex::new(()),
                 delegation_sends: StdMutex::new(HashSet::new()),
+                job_wake_gates: StdMutex::new(HashMap::new()),
                 agent_spawn_watches: StdMutex::new(None),
                 realtime_transcripts: StdMutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),

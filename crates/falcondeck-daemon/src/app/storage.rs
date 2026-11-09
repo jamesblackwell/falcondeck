@@ -259,6 +259,9 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     {
         preferences.max_agent_children = limit;
     }
+    if let Some(seconds) = value.get("delegation_quiet_seconds").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()) {
+        preferences.delegation_quiet_seconds = seconds;
+    }
     if let Some(tokens) = autocompact_tokens_from_value(value.get("claude_autocompact_tokens")) {
         preferences.claude_autocompact_tokens = tokens;
     }
@@ -551,6 +554,9 @@ pub(super) fn apply_preferences_patch(
     }
     if let Some(enabled) = request.review_inbox_enabled {
         preferences.review_inbox_enabled = enabled;
+    }
+    if let Some(seconds) = request.delegation_quiet_seconds {
+        preferences.delegation_quiet_seconds = seconds;
     }
     if let Some(limit) = request.max_agent_children.filter(|l| max_agent_children_in_range(*l)) {
         preferences.max_agent_children = limit;
@@ -1399,6 +1405,20 @@ mod tests {
                 .unwrap()
                 .auto_resume_interrupted_sessions
         );
+    }
+
+    #[tokio::test]
+    async fn delegation_quiet_deadline_defaults_and_off_switch_persist() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("preferences.json");
+        let mut preferences = load_preferences(&path).await.unwrap();
+        assert_eq!(preferences.delegation_quiet_seconds, 14400);
+        assert_eq!(serde_json::from_value::<FalconDeckPreferences>(json!({})).unwrap().delegation_quiet_seconds, 14400);
+        apply_preferences_patch(&mut preferences, UpdatePreferencesRequest { delegation_quiet_seconds:Some(0), ..Default::default() });
+        persist_preferences(&path, &preferences).await.unwrap();
+        assert_eq!(load_preferences(&path).await.unwrap().delegation_quiet_seconds, 0);
+        apply_preferences_patch(&mut preferences, UpdatePreferencesRequest::default());
+        assert_eq!(preferences.delegation_quiet_seconds, 0);
     }
 
     #[tokio::test]

@@ -218,7 +218,7 @@ pub fn append_instructions(
         "FalconDeck manages this session, turns and approvals. Use the available FalconDeck MCP tools when useful; do not wait for the user to name them.\n\n\
          - Inspect other threads only for task context or coordination. Tools describe filtering, paging, messaging and child limits; approvals stay in the UI.\n\
          - Delegation tracking survives restarts. Use result_delivery=\"wake\" when you must act on the result, otherwise batch. Failures, needs-input, interruption and overdue tasks wake regardless. In bot homes, read reports then call falcondeck_acknowledge_results with their report_ids; never acknowledge by messaging their source.\n\
-         - Pending tasks: arm a timed background wake, then falcondeck_task_state waiting with reason and future RFC3339 deadline; finished when done. If no background wake exists, schedule a one-time current-thread automation; if neither works, tell the owner to arrange resumption. Idle does not prove completion. After restart verify external jobs before retrying: background processes may have died and are not automatically retried.\n\
+         - Pending jobs: falcondeck_watch_job with pid and/or result_file and a future RFC3339 deadline persists a wake and declares waiting. For timed waits use a timed background wake or current-thread automation plus falcondeck_task_state waiting; finished when done. Receipt leaves work open; use falcondeck_close_delegation to close or abandon it. After restart verify external jobs before retrying; they are not automatically retried.\n\
          - Notify rarely, only for critical attention or requested results. Normal replies already alert the user, except in bot scheduled-run threads. Decisions belong in reviews. Keep secrets out of push title/summary; report body is encrypted.\n\
          - Link tasks as [Task name](falcondeck://thread/THREAD_ID), using the returned id, never a title or guessed ID.\n\
          - For settings, reviews and automations: falcondeck_search (detail: \"full\" before executing), falcondeck_get, falcondeck_execute. Read schemas and worked examples first. Conversation follow-ups use thread kind current; managed threads are for unrelated standing schedules.\n",
@@ -296,7 +296,7 @@ mod tests {
     fn compact_append_preserves_coordinator_correctness_rules() {
         let text = append_instructions(None, None, None, false);
         for rule in ["falcondeck_acknowledge_results", "report_ids", "future RFC3339 deadline",
-            "timed background wake", "current-thread automation", "verify external jobs",
+            "timed background wake", "current-thread automation", "falcondeck_watch_job", "falcondeck_close_delegation", "verify external jobs",
             "not automatically retried", "Keep secrets out of push title/summary", "approvals stay in the UI"] {
             assert!(text.contains(rule), "missing coordinator rule: {rule}");
         }

@@ -551,9 +551,6 @@ pub const MCP_CLI_TIMEOUT_ENV: &[(&str, &str)] = &[
     ("MAX_MCP_OUTPUT_TOKENS", "25000"),
 ];
 
-/// Codex `-c` override so MCP tool payloads are not clipped at the default.
-pub const CODEX_TOOL_OUTPUT_TOKEN_LIMIT_OVERRIDE: &str = "tool_output_token_limit=25000";
-
 /// One-launch Claude `--mcp-config` file. Dropping the lease unlinks the file
 /// only when the path still names the inode we created.
 pub struct LeasedMcpConfig {

@@ -16,6 +16,8 @@ const LIST: &str = "falcondeck_list_threads";
 const VIEW: &str = "falcondeck_view_thread";
 const CREATE: &str = "falcondeck_create_thread";
 const ACK: &str = "falcondeck_acknowledge_results";
+const CLOSE: &str = "falcondeck_close_delegation";
+const WATCH_JOB: &str = "falcondeck_watch_job";
 const TASK_STATE: &str = "falcondeck_task_state";
 const MESSAGE: &str = "falcondeck_message_thread";
 const SUMMARY: &str = "falcondeck_thread_summary";
@@ -26,15 +28,17 @@ const MAX_ITEMS: usize = 100;
 
 pub(super) fn is_builtin(name: &str) -> bool {
     actions::is_action(name)
-        || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES | NOTIFY | TASK_STATE | ACK)
+        || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES | NOTIFY | TASK_STATE | ACK | CLOSE | WATCH_JOB)
 }
 
 /// `max_children` is the configured per-parent child limit, stated in the create tool's description.
 pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
     let create_description = format!("Start a local or cloud thread and optionally send its first prompt; returns without waiting. execution_target=cloud uses the configured sandbox with the project's current files. At most {max_children} active {} per parent (a user setting). Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", if max_children == 1 { "child" } else { "children" });
     [
+        (CLOSE, "Close delegation", "Explicitly close or abandon your tracked delegation. Report acknowledgement alone leaves work open.", json!({"thread_id":{"type":"string","minLength":1},"abandon":{"type":"boolean","default":false}}), vec!["thread_id"]),
+        (WATCH_JOB, "Watch detached job", "Wake this thread when a local pid exits, result_file appears, or deadline passes. Persists across daemon restarts and declares waiting. Does not run or retry the job.", json!({"pid":{"type":"integer","minimum":2,"maximum":2147483647},"result_file":{"type":"string","minLength":1,"description":"Absolute path on the daemon host."},"deadline":{"type":"string","format":"date-time"}}), vec!["deadline"]),
         (ACK, "Acknowledge outcomes", "Receipt of reports already read, only from the current bot home. Scheduled runs cannot consume home reports. Does not finish tasks.", json!({"report_ids":{"type":"array","items":{"type":"string"},"minItems":0,"maxItems":100}}), vec!["report_ids"]),
-        (TASK_STATE, "Declare task state", "Declare waiting (reason and RFC3339 deadline) or finished. Bots may also update tasks they started or messaged. Waiting flags overdue work but does not resume it: arm a timed wake or current-thread automation first; otherwise ask the owner to arrange resumption.", json!({"thread_id":{"type":"string"}, "state":{"type":"string","enum":["waiting","finished"]}, "reason":{"type":"string","maxLength":500}, "deadline":{"type":"string","format":"date-time"}}), vec!["state"]),
+        (TASK_STATE, "Declare task state", "Declare waiting (reason and RFC3339 deadline) or finished. Bots may also update tasks they started or messaged. Waiting flags overdue work. For detached jobs use falcondeck_watch_job to resume this thread on a job signal.", json!({"thread_id":{"type":"string"}, "state":{"type":"string","enum":["waiting","finished"]}, "reason":{"type":"string","maxLength":500}, "deadline":{"type":"string","format":"date-time"}}), vec!["state"]),
         (LIST, "List threads", "Thread overview excluding you: status, age, harness, flags, last request/reply; newest first, 20 by default. Filter and page with offset. Does not load transcripts.", list::schema(), vec![]),
         (CHANGES, "Thread changes", "Threads active since a time, same rows as list plus what changed (messages, files, commits, checks) when the transcript is loaded. Blocked threads first. Pass the returned Now as since next time to poll without repeats.", json!({
             "since": {"type":"string", "minLength":1, "description":"RFC 3339, YYYY-MM-DD, or an age like 15m, 2h, 1d."},
@@ -499,6 +503,22 @@ impl AppState {
             vec![workspace.clone()]
         };
         match name {
+            CLOSE => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct CloseArgs { thread_id: String, #[serde(default)] abandon: bool }
+                let a: CloseArgs = args(arguments)?;
+                self.close_delegation(parent, &a.thread_id, a.abandon).await?;
+                Ok(response("Delegation closed; receipt history retained.".into()))
+            }
+            WATCH_JOB => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct WatchArgs { pid: Option<u32>, result_file: Option<PathBuf>, deadline: chrono::DateTime<Utc> }
+                let a: WatchArgs = args(arguments)?;
+                let id = self.watch_job(&workspace, parent, a.pid, a.result_file, a.deadline).await?;
+                Ok(response(format!("Job watch {id} persisted; waiting until {} or a job signal.", a.deadline)))
+            }
             ACK => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

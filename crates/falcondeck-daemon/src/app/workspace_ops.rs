@@ -3788,6 +3788,7 @@ async fn send_turn_with_startup_mode(
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
                 wait_for_startup: wait_for_startup
+                    || request.user_item_id.as_deref().is_some_and(|id| id.starts_with("user-job-watch-"))
                     || !outcome_ids.is_empty()
                     || request.resume_interrupted
                     || is_transient_retry,

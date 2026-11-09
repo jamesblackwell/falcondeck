@@ -118,7 +118,7 @@ transcripts.
 Narrow with `status` (one or many, including `awaiting_approval`),
 `updated_since`/`updated_before` (RFC 3339, `YYYY-MM-DD`, or `30m`/`24h`/`7d`),
 `query` (literal, case-insensitive, over titles, ids and message excerpts),
-`parent` (`"self"` for threads you created), `provider`, `folder`, `pinned`, and
+`parent` (`"self"` also includes open message delegations), `provider`, `folder`, `pinned`, and
 `archived` (`exclude`/`include`/`only`). `detail: "brief"` drops the excerpt
 lines for long scans; `sort` is `updated`, `created`, or `title`. Page with the
 returned `offset`, keeping filters unchanged.
@@ -193,6 +193,8 @@ remains the legacy creation opt-in for completion wakes.
 Daemon tracking and its bounded outbox survive restarts. Only the current bot
 home receives reports; fresh scheduled runs cannot consume them. After reading,
 the home calls `falcondeck_acknowledge_results` once with the supplied report_ids.
+Acknowledgement confirms receipt only; use `falcondeck_close_delegation`
+(`thread_id`, optional `abandon`) to resolve open work.
 Provider startup confirms receipt but does not remove reports; failed ACP
 startup leaves them unreceived. Full details appear in at most three accepted
 home contexts, then collapse. Unread results, including batch completions, have
@@ -201,17 +203,13 @@ Reports expire after seven days; consult native task history for older outcomes.
 
 A pending task declares `falcondeck_task_state` with state `waiting`, a reason
 and a future RFC3339 deadline. Waiting is informational; polling it does not
-start a paid coordinator turn. A missed deadline emits one attention report and
-ends that wait's tracking. Explicit follow-up or a renewed wait starts a new
-interval. Declare `finished` when done; a bot resolving its own task does not
+start a paid coordinator turn. A missed deadline emits one attention report; work stays open. Unmarked work
+gets a configurable four-hour inactivity deadline (zero disables it). Declare `finished` when done; a bot resolving its own task does not
 wake itself about that declaration.
 
-Before parking for a time or a job, arm a timed background wake. On harnesses
-without background wake support, use a one-time FalconDeck automation targeted
-at the current thread. If scheduling is unavailable, tell the owning bot that it
-must arrange the wake, declare the deadline wait, and hand off explicitly; do
-not pretend that a detached shell command can resume the agent. Verify external
-jobs after restart before repeating side effects.
+For detached jobs call `falcondeck_watch_job` with `pid` and/or absolute
+`result_file`, plus a future RFC3339 `deadline`; it persists a wake, declares
+waiting, and survives daemon restart. Verify the result before retrying work.
 
 `falcondeck_wait_thread` waits up to 25 seconds for one thread to stop running
 and reports its state, request and reply, plus pending requests with the ids

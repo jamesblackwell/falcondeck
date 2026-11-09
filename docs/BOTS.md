@@ -257,8 +257,11 @@ leaves an informational report; it does not add a duplicate wake.
 the older session-local watcher. Paused and archived bots are never woken.
 
 Only the bot's current home receives reports. `falcondeck_acknowledge_results`
-removes the supplied report_ids after reading; fresh scheduled runs cannot take
-home reports. Native provider startup must succeed with those reports in its
+confirms receipt of the supplied report_ids; fresh scheduled runs cannot take
+home reports. Receipt never closes delegated work. Acknowledged and superseded
+outcomes remain in the local ledger's history for at least seven days after
+retirement, with report time, delivery policy, accepted receipt and acknowledgement
+time. They are not reinjected or automatically delivered again. Native provider startup must succeed with those reports in its
 context before receipt is recorded. ACP waits for startup for such a turn.
 Failed sends retain the outbox and retry with a five-minute cooldown without
 spending the paid-turn budget. One accepted report turn stops immediate retries.
@@ -287,31 +290,61 @@ are separate states. A report already acknowledged needs no escalation.
 A task declares `falcondeck_task_state` with `state: waiting`, reason, and a
 future RFC3339 deadline. Polling a wait does not wake the coordinator. A reported
 idle wait is not re-interrupted on restart. A missed deadline emits one urgent
-outcome, clears the wait and closes that interval. Renew the wait or explicitly
-re-message before continuing. Declaring a wait on a terminal finished task
+outcome and clears the wait; the delegation stays open. Renew the wait or
+continue the task when ready. Declaring a wait on a terminal finished task
 returns an error. Each distinct input request is urgent, including a second
 approval in the same turn. `finished` closes work; a bot's declaration does not
 wake itself merely to acknowledge the declaration.
 
-An unmarked idle turn is completion unverified. Its same-turn background-resume
-watch lasts up to seven days within the 200 closed-record cap. Pending jobs
-must declare their wait before parking to retain an open watch.
-Open running/waiting tasks never expire or get evicted by capacity limits. Work
-open more than seven days generates one urgent progress check and remains
-tracked. Closed metadata lasts seven days, capped at 200 records per bot.
-Ordinary reports expire after seven days; unreceived urgent reports remain
-until received or escalated. Retention losses appear in home context.
+An unmarked idle turn is completion unverified and stays open, including after
+its report is acknowledged. Every tracked delegation gets an inactivity deadline
+from its last observed worker activity unless it has declared a wait or finished.
+`delegation_quiet_seconds` is a daemon preference, default 14400 (four hours);
+zero disables the default. An explicit wait's deadline takes precedence. Passing
+the default emits an urgent “went quiet” outcome using the existing bounded
+wake path, regardless of batch/wake delivery. A missed explicit deadline falls
+back to a new default interval. While work stays silent and open, each overdue
+report starts another default interval; worker activity extends it from that
+activity. Receipt never disables the deadline.
+
+`falcondeck_close_delegation` takes `thread_id` and optional `abandon: true`.
+Only the delegator can close its own interest; closing one bot's interest does
+not close another's interest in the same worker. Worker `finished` declarations
+resolve the task. Open delegations are included in the owner's turn context
+(up to four short lines, plus a count), and `falcondeck_list_threads` with
+`parent: "self"` includes open interests in messaged threads as well as children.
+Open work is never evicted by the closed-record capacity limit. Work open more
+than seven days generates one urgent progress check and remains tracked.
+
+For detached local jobs, `falcondeck_watch_job` takes a `pid` and/or absolute
+`result_file` path and a future RFC3339 `deadline`. It atomically persists a
+watch and declares waiting, even for a thread with no delegator. Up to sixteen
+pending watches are allowed per thread. The first observed signal (result file,
+process exit, or timeout) queues a wake to that worker. A result path is checked
+for existence only; its contents never enter the wake. A file signal only means
+the file exists, so callers should write an atomic completion sentinel (for
+example, rename a fully written temporary file). Process start identity
+is persisted to detect pid reuse; zombies count as exited. After restart the
+result file is checked first, a live matching process remains watched, a gone
+process wakes with exit status unknown, and an uncheckable or reused pid wakes
+with “state unknown”. File-only watches remain pending until a file or timeout.
+The daemon never repeats the external job.
+
+Job signals and pending delivery survive restart. Failed wake admission retries
+after five minutes; successful admission retires the watch. Delivery is at least
+once if the daemon crashes between admission and recording its receipt. A worker
+must verify the job before retrying side effects. Declaring the task finished
+cancels its pending job watches. Explicitly closing a delegator's interest does
+not cancel the worker's job. No install or restart is needed to register a watch.
+Ordinary outcome reports expire after seven days; unreceived urgent reports
+remain until received or escalated. Retention losses appear in home context.
 Tracking storage failure does not reject a message: dispatch continues and a
 deduplicated notification identifies the lost watch.
 
-Arm a timed wake before parking for a job or time. If the harness has no
-background wake, use a one-time daemon automation in the current thread. If
-scheduling is unavailable, explicitly hand resumption to the owner. A detached
-shell process alone cannot resume an agent. Inspect external jobs before
-retrying side effects. Tracking adds no automatic worker retry. Report wakes
-also never replace a shutdown-interrupted home, even with auto-resume off:
-James's explicit resume decision is preserved and the two-hour escalation is
-the fallback. Configured native recovery remains free to resume it.
+For time-only waits, arm a timed wake or a one-time daemon automation in the
+current thread and declare waiting. Report wakes never replace a
+shutdown-interrupted home, even with auto-resume off: James's explicit resume
+decision is preserved and the two-hour escalation is the fallback.
 
 Upgrade registration uses restored creation ancestry and recorded delegation
 or message relationships, including scheduled-run children and reused threads.
