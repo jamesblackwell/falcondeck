@@ -27,7 +27,7 @@ export function StoragePanel({ baseUrl, onOpenThread }: { baseUrl: string | null
   };
   return <SettingsPage>
     <SettingsPageHeader title="Storage" description="Review disk use and clean up retained task workspaces." />
-    <div className="flex gap-2"><Button disabled={busy || !api} onClick={() => void refresh()}>Refresh</Button><Button disabled={busy || !api} onClick={() => setConfirm({ description: 'Run the scheduled cleanup policy now? Eligible caches and checkouts will be removed. Branches and task history stay available.', run: async () => { const r = await api!.cleanup(); setResult(r.entries.join('\n') || 'No eligible files to remove.'); } })}>Clean up now</Button></div>
+    <div className="flex gap-2"><Button disabled={busy || !api} onClick={() => void refresh()}>Refresh</Button><Button disabled={busy || !api || !report} onClick={() => setConfirm({ description: 'Run the scheduled cleanup policy now? Eligible caches and checkouts will be removed. Branches and task history stay available.', run: async () => { const r = await api!.cleanup(); setResult(r.entries.join('\n') || 'No eligible files to remove.'); } })}>Clean up now</Button></div>
     {!api && <p>Connect to the local daemon to inspect storage.</p>}
     {busy && <p role="status">Checking storage…</p>}
     {error && <p role="alert">{error}</p>}

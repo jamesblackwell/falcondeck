@@ -1606,9 +1606,10 @@ pub(super) async fn archive_thread(
 fn spawn_variant_reclaim(app: &AppState, workspace_id: &str, thread_ids: Vec<String>) {
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
-    tokio::spawn(async move {
+    let worker = app.clone();
+    app.spawn_background_task(async move {
         for thread_id in thread_ids {
-            reclaim_archived_variant(&app, &workspace_id, &thread_id).await;
+            reclaim_archived_variant(&worker, &workspace_id, &thread_id).await;
         }
     });
 }
@@ -1644,38 +1645,63 @@ pub(super) async fn reclaim_archived_variant(
     // Archive may race background dependency provisioning. Wait outside the
     // gate, then re-check archive/activity before any removal.
     let _ = crate::variant::wait_dependencies(&variant.path).await;
-    if Utc::now().signed_duration_since(activity).num_seconds() <= 86400 || !app.storage_archive_allowed(&workspace_path, &variant).await { return None; }
-    let assessment = crate::variant::assess(&workspace_path, &variant).await;
-    let gate = app.variant_gate(workspace_id, thread_id).await;
-    let _guard = gate.lock().await;
+    if Utc::now().signed_duration_since(activity).num_seconds() <= 86400
+        || !app.storage_archive_allowed(&workspace_path, &variant).await
     {
-        let ws = app.inner.workspaces.lock().await;
-        let t = ws.get(workspace_id)?.threads.get(thread_id)?;
-        if !t.summary.is_archived || t.summary.updated_at != activity
-            || t.summary.variant.as_ref() != Some(&variant)
-            || matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
-            || !t.queued_requests.is_empty() || !t.summary.queued_turns.is_empty() || t.dispatching_request.is_some() { return None; }
+        return None;
     }
-    if !app.storage_archive_allowed(&workspace_path, &variant).await { return None; }
-    let outcome = match assessment {
-        Ok(ticket) => crate::variant::finish_reclaim(&workspace_path, &variant, ticket).await,
-        Err(result) => result,
+    let _storage_guard = app.inner.storage_gate.lock().await;
+    let mut run = falcondeck_core::storage::StorageRun {
+        id: Uuid::new_v4().to_string(),
+        started_at: Utc::now().timestamp(),
+        ..Default::default()
     };
-    match &outcome {
-        crate::variant::Reclaim::Removed => {
-            tracing::info!(thread_id, path = %variant.path, "reclaimed isolated copy of archived thread");
-        }
-        crate::variant::Reclaim::Kept(reasons) => {
-            tracing::info!(
-                thread_id,
-                path = %variant.path,
-                branch = %variant.branch,
-                reasons = %reasons.join("; "),
-                "kept isolated copy of archived thread"
-            );
-        }
+    if app.save_storage_run(&run).await.is_err() {
+        return None;
     }
-    Some(outcome)
+    let result = async {
+        let assessment = crate::variant::assess(&workspace_path, &variant).await;
+        let gate = app.variant_gate(workspace_id, thread_id).await;
+        let _guard = gate.lock().await;
+        {
+            let ws = app.inner.workspaces.lock().await;
+            let t = ws.get(workspace_id)?.threads.get(thread_id)?;
+            if !t.summary.is_archived
+                || t.summary.updated_at != activity
+                || t.summary.variant.as_ref() != Some(&variant)
+                || matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
+                || !t.queued_requests.is_empty()
+                || !t.summary.queued_turns.is_empty()
+                || t.dispatching_request.is_some()
+            {
+                return None;
+            }
+        }
+        if !app.storage_archive_allowed(&workspace_path, &variant).await {
+            return None;
+        }
+        let outcome = match assessment {
+            Ok(ticket) => crate::variant::finish_reclaim(&workspace_path, &variant, ticket).await,
+            Err(result) => result,
+        };
+        match &outcome {
+            crate::variant::Reclaim::Removed => {
+                tracing::info!(thread_id, path = %variant.path, "reclaimed isolated copy of archived thread");
+            }
+            crate::variant::Reclaim::Kept(reasons) => {
+                tracing::info!(thread_id, path = %variant.path, branch = %variant.branch,
+                    reasons = %reasons.join("; "), "kept isolated copy of archived thread");
+            }
+        }
+        Some(outcome)
+    }.await;
+    run.entries
+        .push(format!("Archive {workspace_id}/{thread_id}: {result:?}"));
+    run.finished_at = Some(Utc::now().timestamp());
+    if let Err(e) = app.save_storage_run(&run).await {
+        tracing::warn!(%e,"failed to finish archive cleanup log");
+    }
+    result
 }
 
 pub(super) async fn archive_all_threads(
@@ -9695,6 +9721,7 @@ mod tests {
         )
         .unwrap();
         age_storage_tree(std::path::Path::new(&f.variant.path));
+        age_storage_tree(&f.project.join(".git"));
         f.app
             .with_managed_thread_mut("workspace-1", "thread-1", |t| {
                 t.summary.updated_at = Utc::now() - chrono::Duration::days(20)
@@ -9705,7 +9732,7 @@ mod tests {
     }
     #[tokio::test]
     async fn storage_policy_protects_dirty_running_queued_and_recent_variants() {
-        for reason in ["dirty", "untracked", "running", "queued", "recent"] {
+        for reason in ["dirty", "untracked", "running", "queued", "recent_git", "recent"] {
             let f = storage_fixture().await;
             let path = std::path::Path::new(&f.variant.path);
             match reason {
@@ -9730,6 +9757,10 @@ mod tests {
                         })
                         .await
                         .unwrap();
+                }
+                "recent_git" => {
+                    let admin=VariantFixture::git_at(path,&["rev-parse","--absolute-git-dir"]);
+                    std::fs::File::open(std::path::Path::new(&admin).join("index")).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
                 }
                 _ => std::fs::write(path.join("node_modules/cache"), "recent").unwrap(),
             }
@@ -9831,4 +9862,26 @@ mod tests {
         assert!(!artifact.exists());
         assert!(f.project.join("a.txt").exists());
     }
+    #[tokio::test]
+    async fn storage_cleanup_keeps_ownership_when_the_request_disconnects() {
+        use falcondeck_core::storage::{StorageAction,StorageActionRequest};
+        let f=storage_fixture().await;
+        let gate=f.app.variant_gate("workspace-1","thread-1").await;
+        let held=gate.lock().await;
+        let app=f.app.clone();
+        let caller=tokio::spawn(async move {app.storage_variant_action(StorageActionRequest {
+            workspace_id:"workspace-1".into(),thread_id:"thread-1".into(),action:StorageAction::ClearCaches,confirmed:true
+        }).await});
+        tokio::time::timeout(std::time::Duration::from_secs(3),async {
+            loop {if f.app.inner.storage_gate.try_lock().is_err(){break;}tokio::task::yield_now().await;}
+        }).await.unwrap();
+        caller.abort();drop(held);
+        let cache=std::path::Path::new(&f.variant.path).join("node_modules");
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            while cache.exists(){tokio::time::sleep(std::time::Duration::from_millis(10)).await;}
+        }).await.unwrap();
+        assert!(std::path::Path::new(&f.variant.path).join("a.txt").exists());
+        f.app.shutdown().await.unwrap();
+    }
+
 }

@@ -49,7 +49,7 @@ fn relative_path(s: &str) -> bool {
     !s.is_empty()
         && Path::new(s)
             .components()
-            .all(|c| matches!(c, Component::Normal(n) if n != ".git"))
+            .all(|c| matches!(c, Component::Normal(n) if !n.to_string_lossy().eq_ignore_ascii_case(".git")))
 }
 fn scan(path: &Path, custom: &[String]) -> std::io::Result<Facts> {
     fn walk(
@@ -63,7 +63,9 @@ fn scan(path: &Path, custom: &[String]) -> std::io::Result<Facts> {
         let m = std::fs::symlink_metadata(p)?;
         let mut f = Facts {
             newest: seconds(m.modified()?),
-            contains_git: p.file_name().is_some_and(|n| n == ".git"),
+            contains_git: p
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(".git")),
             ..Facts::default()
         };
         if seen.insert((m.dev(), m.ino())) {
@@ -183,6 +185,20 @@ pub(super) fn disk_level(bytes: u64) -> &'static str {
     }
 }
 impl AppState {
+    fn storage_test_boundary(&self) -> Result<(), DaemonError> {
+        // Tests deliberately retain the real HOME. A fixture which forgets its
+        // state_path must never turn that into permission to sweep live data.
+        if std::env::var("FALCONDECK_TEST_NO_PROVIDERS").as_deref() == Ok("1") {
+            let root = std::fs::canonicalize(self.storage_root())?;
+            let temp = std::fs::canonicalize(std::env::temp_dir())?;
+            if !root.starts_with(&temp) || root == temp {
+                return Err(DaemonError::Conflict(
+                    "Test cleanup requires an isolated data root inside TMPDIR".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     pub(super) fn storage_root(&self) -> PathBuf {
         self.inner
             .state_path
@@ -303,6 +319,23 @@ impl AppState {
                 "Variant branch changed; retained for review".into(),
             ));
         }
+        let actual_common = git(
+            &v.path,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .await?;
+        let project_common = git(
+            project,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .await?;
+        if tokio::fs::canonicalize(actual_common.trim()).await?
+            != tokio::fs::canonicalize(project_common.trim()).await?
+        {
+            return Err(DaemonError::Rpc(
+                "Variant belongs to a different project; retained for review".into(),
+            ));
+        }
         let top = git(&v.path, &["rev-parse", "--show-toplevel"]).await?;
         if tokio::fs::canonicalize(top.trim()).await.ok().as_ref() != Some(&canonical)
             || tokio::fs::canonicalize(project).await.ok().as_ref() == Some(&canonical)
@@ -327,7 +360,20 @@ impl AppState {
         Ok(())
     }
     async fn cache_paths(&self, project: &str, v: &ThreadVariant) -> Result<Facts, DaemonError> {
-        facts(PathBuf::from(&v.path), Self::cache_hook(project).await?).await
+        let mut f = facts(PathBuf::from(&v.path), Self::cache_hook(project).await?).await?;
+        let git_dir = PathBuf::from(
+            git(&v.path, &["rev-parse", "--absolute-git-dir"])
+                .await?
+                .trim(),
+        );
+        for relative in ["HEAD", "index", "logs/HEAD"] {
+            match tokio::fs::symlink_metadata(git_dir.join(relative)).await {
+                Ok(m) => f.newest = f.newest.max(seconds(m.modified()?)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(f)
     }
     pub async fn storage_report(&self) -> Result<StorageReport, DaemonError> {
         let _guard = self.inner.storage_gate.lock().await;
@@ -355,7 +401,9 @@ impl AppState {
                 let f = facts(e.path(), Vec::new()).await?;
                 total += f.bytes;
                 *categories.entry(cat.to_string()).or_insert(0) += f.bytes;
-                if matches!(cat, "artifacts" | "experiments") && e.path().is_dir() {
+                if matches!(cat, "artifacts" | "experiments")
+                    && std::fs::symlink_metadata(e.path())?.is_dir()
+                {
                     for child in
                         std::fs::read_dir(e.path()).map_err(|e| DaemonError::Rpc(e.to_string()))?
                     {
@@ -488,6 +536,22 @@ impl AppState {
                 "Confirm this destructive storage action".into(),
             ));
         }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let app = self.clone();
+        if !self.spawn_background_task(async move {
+            let _ = tx.send(app.storage_variant_action_owned(r).await);
+        }) {
+            return Err(DaemonError::Conflict("Daemon is shutting down".into()));
+        }
+        rx.await.map_err(|e| DaemonError::Rpc(e.to_string()))?
+    }
+    async fn storage_variant_action_owned(
+        &self,
+        r: StorageActionRequest,
+    ) -> Result<StorageRun, DaemonError> {
+        self.storage_test_boundary()?;
+        // The daemon owns the operation and gates even if the HTTP client
+        // disconnects while a blocking filesystem removal is still running.
         let _guard = self.inner.storage_gate.lock().await;
         let mut run = StorageRun {
             id: Uuid::new_v4().to_string(),
@@ -648,7 +712,7 @@ impl AppState {
         }
         Ok(format!("Cleared {cleared} cache directories"))
     }
-    async fn save_storage_run(&self, run: &StorageRun) -> Result<(), DaemonError> {
+    pub(super) async fn save_storage_run(&self, run: &StorageRun) -> Result<(), DaemonError> {
         let mut runs: Vec<StorageRun> = self.storage_json("storage-runs.json").await?;
         if runs
             .last()
@@ -682,10 +746,18 @@ impl AppState {
                 "Confirm cleanup before deleting files".into(),
             ));
         }
-        let _guard = self.inner.storage_gate.lock().await;
-        self.storage_cleanup_locked().await
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let app = self.clone();
+        if !self.spawn_background_task(async move {
+            let _guard = app.inner.storage_gate.lock().await;
+            let _ = tx.send(app.storage_cleanup_locked().await);
+        }) {
+            return Err(DaemonError::Conflict("Daemon is shutting down".into()));
+        }
+        rx.await.map_err(|e| DaemonError::Rpc(e.to_string()))?
     }
     async fn storage_cleanup_locked(&self) -> Result<StorageRun, DaemonError> {
+        self.storage_test_boundary()?;
         let p = self.storage_preferences().await?;
         let mut run = StorageRun {
             id: Uuid::new_v4().to_string(),
@@ -797,6 +869,9 @@ impl AppState {
         Ok(run)
     }
     pub(super) async fn storage_archive_allowed(&self, project: &str, v: &ThreadVariant) -> bool {
+        if self.storage_test_boundary().is_err() {
+            return false;
+        }
         if !self
             .storage_preferences()
             .await
@@ -810,6 +885,9 @@ impl AppState {
             .is_ok_and(|f| Utc::now().timestamp().saturating_sub(f.newest) > DAY)
     }
     pub(super) async fn storage_daily_tick(&self) {
+        if self.storage_test_boundary().is_err() {
+            return;
+        }
         let Ok(_guard) = self.inner.storage_gate.try_lock() else {
             return;
         };
@@ -819,15 +897,22 @@ impl AppState {
         if !p.scheduled {
             return;
         }
-        let Ok(runs) = self
-            .storage_json::<Vec<StorageRun>>("storage-runs.json")
+        let Ok(last) = self
+            .storage_json::<Option<i64>>("storage-last-scheduled.json")
             .await
         else {
             return;
         };
-        if runs
-            .last()
-            .is_some_and(|r| Utc::now().timestamp().saturating_sub(r.started_at) < DAY)
+        let now = Utc::now().timestamp();
+        if last.is_some_and(|started| now.saturating_sub(started) < DAY) {
+            return;
+        }
+        // A separate marker cannot be evicted or postponed by manual/archive
+        // activity in the bounded run log.
+        if self
+            .write_storage_json("storage-last-scheduled.json", &Some(now))
+            .await
+            .is_err()
         {
             return;
         }
@@ -897,6 +982,7 @@ mod tests {
             "a/../b",
             ".git",
             "a/.git/index",
+            "a/.GIT/index",
         ] {
             assert!(!relative_path(s), "{s}");
         }
@@ -931,5 +1017,49 @@ mod tests {
             30
         );
         assert!(app.storage_cleanup(false).await.is_err());
+    }
+    #[tokio::test]
+    async fn daily_schedule_is_durable_independent_of_manual_runs_and_can_be_disabled() {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            root.path().join("state.json"),
+        );
+        app.storage_daily_tick().await;
+        assert_eq!(
+            app.storage_json::<Vec<StorageRun>>("storage-runs.json")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        app.storage_cleanup(true).await.unwrap();
+        app.storage_daily_tick().await;
+        assert_eq!(
+            app.storage_json::<Vec<StorageRun>>("storage-runs.json")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        app.update_storage_preferences(StoragePreferences {
+            scheduled: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        app.write_storage_json("storage-last-scheduled.json", &Some(0_i64))
+            .await
+            .unwrap();
+        app.storage_daily_tick().await;
+        assert_eq!(
+            app.storage_json::<Vec<StorageRun>>("storage-runs.json")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        app.shutdown().await.unwrap();
     }
 }

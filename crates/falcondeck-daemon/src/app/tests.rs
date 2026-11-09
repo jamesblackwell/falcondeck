@@ -9770,6 +9770,7 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
     }
     age_tree(std::path::Path::new(&safe.path));
     age_tree(std::path::Path::new(&unpushed.path));
+    age_tree(&project.join(".git"));
     let app = AppState::new_with_state_path(
         "test".to_string(),
         HashMap::new(),

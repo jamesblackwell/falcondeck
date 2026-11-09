@@ -152,7 +152,7 @@ that removal attempt.
 
 A five-minute maintenance tick measures free space independently of cleanup.
 It starts at most one daemon-owned cleanup worker per day, using a durable
-`storage-runs.json` start time. This is a zero-token daemon job, not an agent
+`storage-last-scheduled.json` start time independent of manual/archive runs. This is a zero-token daemon job, not an agent
 automation. A restart does not replay a daily run already started. The daily
 policy intentionally inventories the existing managed backlog; the measured
 9 November dry run and its expected first-run savings are recorded in
@@ -170,7 +170,8 @@ the production timer no longer uses their 72-hour policy.
 - Only managed Git worktree variants are eligible. Main project checkouts,
   shared paths, standalone clones, symlink roots and symlink ancestors stay.
 - Running, waiting, queued and dispatching tasks stay. Both task activity and
-  recursive filesystem modification time must be more than 24 hours old.
+  recursive filesystem modification time must be more than 24 hours old, including
+  the worktree-specific HEAD, index and HEAD reflog.
 - Dirty variants stay, including untracked files and hidden index flags. Storage
   shows these tasks for opening, with no deletion buttons.
 - After more than 3 idle days, remove only known ecosystem cache directories
