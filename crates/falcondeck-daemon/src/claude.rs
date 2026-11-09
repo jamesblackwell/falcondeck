@@ -1656,8 +1656,13 @@ async fn read_additional_model_options() -> Vec<DiscoveredClaudeModel> {
     parse_additional_model_options(&value)
 }
 
-/// Picker catalog: curated aliases plus any extra ids the CLI config advertises.
+/// Machine catalog, also used by lazy workspace placeholders on mobile.
 pub async fn list_models() -> Vec<ModelSummary> {
+    let resolved = resolve_agent_binary("claude", "claude");
+    model_catalog::list_models_for_bin(&resolved.executable).await
+}
+
+async fn fallback_models() -> Vec<ModelSummary> {
     let extras = read_additional_model_options().await;
     merge_claude_models(curated_models(), &extras)
 }

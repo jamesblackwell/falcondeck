@@ -110,7 +110,7 @@ fn parse_initialize_models(value: &Value) -> Option<Vec<DiscoveredClaudeModel>> 
 }
 
 pub(super) async fn list_models_for_bin(claude_bin: &str) -> Vec<ModelSummary> {
-    let mut models = list_models().await;
+    let mut models = fallback_models().await;
     let discovered = discover(claude_bin).await;
     for model in &mut models {
         let family = model.id.strip_suffix("[1m]").unwrap_or(&model.id);

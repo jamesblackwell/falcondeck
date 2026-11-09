@@ -29,7 +29,7 @@ from March 2026 docs.
 
 The `initialize` **control response** contains `models` with `value`,
 `displayName`, and `resolvedModel`; this is distinct from the `system` init
-event in the original probe. Workspace connection and metadata refresh now
+event in the original probe. Lazy workspace placeholders, connection, and metadata refresh now
 query this catalog through `claude -p` stream-json without a user message or
 model generation. The probe disables project configuration, hooks, plugins,
 MCP servers, and session persistence. It is bounded to ten seconds and shared
