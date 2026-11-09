@@ -386,14 +386,43 @@ impl AppState {
             ],
         )
         .await?;
+        let flags = git(path, &["ls-files", "-v", "-z"]).await?;
+        let omitted: HashSet<&str> = flags
+            .split('\0')
+            .filter_map(|entry| {
+                entry
+                    .strip_prefix("S ")
+                    .or_else(|| entry.strip_prefix("s "))
+            })
+            .collect();
         let mut newest = 0;
         for name in files.split('\0').filter(|p| !p.is_empty()) {
             let file = Path::new(path).join(name);
             let metadata = match tokio::fs::symlink_metadata(&file).await {
                 Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && omitted.contains(name) => {
+                    // Sparse omissions are not working-tree deletions or activity.
+                    continue;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // A tracked deletion has no inode; its parent records when it vanished.
-                    tokio::fs::symlink_metadata(file.parent().unwrap_or(Path::new(path))).await?
+                    // A real deletion has no inode. Its nearest surviving
+                    // ancestor records removal of a whole source directory.
+                    let mut parent = file.parent();
+                    loop {
+                        let directory =
+                            parent.filter(|p| p.starts_with(path)).ok_or_else(|| {
+                                DaemonError::Rpc(
+                                    "Checkout disappeared during activity check".into(),
+                                )
+                            })?;
+                        match tokio::fs::symlink_metadata(directory).await {
+                            Ok(m) => break m,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                parent = directory.parent()
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
                 }
                 Err(e) => return Err(e.into()),
             };

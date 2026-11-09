@@ -10208,4 +10208,58 @@ mod tests {
                 .contains("not populated")
         );
     }
+    #[tokio::test]
+    async fn storage_sparse_omissions_do_not_break_inventory_or_cache_cleanup() {
+        use falcondeck_core::storage::StoragePreferences;
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::create_dir_all(path.join("omitted/deep")).unwrap();
+        std::fs::write(
+            path.join("omitted/deep/data.txt"),
+            "tracked omitted content",
+        )
+        .unwrap();
+        VariantFixture::git_at(path, &["add", "omitted"]);
+        VariantFixture::git_at(path, &["commit", "-m", "sparse source"]);
+        VariantFixture::git_at(
+            path,
+            &["sparse-checkout", "set", "--no-cone", "/*", "!/omitted/"],
+        );
+        assert!(!path.join("omitted").exists());
+        age_storage_tree(path);
+        age_storage_tree(&f.project.join(".git"));
+        f.app
+            .update_storage_preferences(StoragePreferences {
+                reclaim_checkouts: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let report = f.app.storage_report().await.unwrap();
+        assert!(report.variants[0].cache_blocked.is_none());
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(!path.join("node_modules").exists());
+        assert!(path.join("a.txt").exists());
+        assert!(!path.join("omitted").exists());
+        assert_eq!(
+            VariantFixture::git_at(path, &["show", "HEAD:omitted/deep/data.txt"]),
+            "tracked omitted content"
+        );
+    }
+    #[tokio::test]
+    async fn storage_recent_deleted_source_directory_is_protected() {
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::create_dir_all(path.join("removed/deep")).unwrap();
+        std::fs::write(path.join("removed/deep/data.txt"), "tracked source").unwrap();
+        VariantFixture::git_at(path, &["add", "removed"]);
+        VariantFixture::git_at(path, &["commit", "-m", "source tree"]);
+        age_storage_tree(path);
+        age_storage_tree(&f.project.join(".git"));
+        std::fs::remove_dir_all(path.join("removed")).unwrap();
+        let report = f.app.storage_report().await.unwrap();
+        assert!(report.variants[0].cache_blocked.is_some());
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(path.join("node_modules").exists());
+    }
 }

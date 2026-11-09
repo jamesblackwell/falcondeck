@@ -177,6 +177,8 @@ the production timer no longer uses their 72-hour policy.
 - After more than 3 idle days, caches can be cleared in **clean or dirty**
   variants. For this action, 24-hour filesystem activity is measured only on
   tracked and non-ignored untracked files; cache mtimes do not block cleanup.
+  Absent skip-worktree paths are sparse omissions, not recent activity. Actual
+  tracked deletions use the nearest surviving parent directory for recency.
   Each directory must be Git-ignored and have no tracked descendants. Known
   caches include `node_modules`, `.cache`, `build`, `DerivedData`, `.cxx`,
   `.gradle`, `Pods`, `.next`, `.nuxt`, `.turbo`, `.parcel-cache`, `.svelte-kit`,
