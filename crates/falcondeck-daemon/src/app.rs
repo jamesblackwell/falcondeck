@@ -134,6 +134,7 @@ mod title_suggestions;
 mod utility_model;
 mod workspace_ops;
 mod variant_lifecycle;
+mod workspace_storage;
 mod workspace_restore;
 
 use agent_helpers::*;
@@ -320,6 +321,7 @@ struct InnerState {
     variant_maintenance_started: AtomicBool,
     variant_reap_tick_running: AtomicBool,
     variant_disk_gate: Mutex<()>,
+    storage_gate: Mutex<()>,
     variant_dependency_watches: Mutex<HashSet<(String, String)>>,
     /// Resolved sidebar icon bytes keyed by workspace id.
     workspace_icons: Mutex<HashMap<String, crate::workspace_icons::CachedWorkspaceIcon>>,
@@ -1218,6 +1220,7 @@ impl AppState {
                 variant_maintenance_started: AtomicBool::new(false),
                 variant_reap_tick_running: AtomicBool::new(false),
                 variant_disk_gate: Mutex::new(()),
+                storage_gate: Mutex::new(()),
                 variant_dependency_watches: Mutex::new(HashSet::new()),
                 service_notices: StdMutex::new(Vec::new()),
                 operational_conditions: StdMutex::new(HashMap::new()),
@@ -2339,6 +2342,7 @@ impl AppState {
     pub async fn health(&self) -> HealthResponse {
         let workspaces = self.inner.workspaces.lock().await.len();
         HealthResponse {
+            free_bytes: crate::variant::available_disk(&self.storage_root()).await,
             ok: true,
             version: self.inner.daemon.version.clone(),
             workspaces,

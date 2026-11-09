@@ -142,37 +142,87 @@ that removal attempt.
 | Event | Behaviour |
 |---|---|
 | Archive (single/all) | Attempt safe reclamation in the background. |
-| Successful live turn completion | Persist eligibility for 72 hours later. |
-| Periodic maintenance | Check disk space and consider only explicitly eligible threads. |
+| Successful live turn completion | Update task activity; daily policy uses 3/14-day idle thresholds. |
+| Periodic maintenance | Check free disk every five minutes; run the configured daily storage policy. |
 | Resume/unarchive or checkout access | Restore missing checkout from the kept branch/recipe. |
 | Delete thread/workspace | Return without waiting for remote cleanup; safe cleanup runs in the background. |
-| Daemon startup | Restore saved eligibility; never enroll the existing backlog. |
+| Daemon startup | Restore settings/run log; daily policy includes managed variants after fresh safety checks. |
 
-### Durable eligibility, without a backlog sweep
+### Daily daemon storage policy
 
-`ManagedThread.variant_reap` is an optional daemon-only record serialized with
-its `PersistedThreadState` in daemon-state.json:
+A five-minute maintenance tick measures free space independently of cleanup.
+It starts at most one daemon-owned cleanup worker per day, using a durable
+`storage-runs.json` start time. This is a zero-token daemon job, not an agent
+automation. A restart does not replay a daily run already started. The daily
+policy intentionally inventories the existing managed backlog; the measured
+9 November dry run and its expected first-run savings are recorded in
+[the storage audit](reports/2026-11-09-storage-audit.md).
 
-- `completed_at`: identifies the successful completion.
-- `eligible_after`: initially 72 hours after that completion.
+`storage-preferences.json` has separate switches for the schedule, cache cleanup,
+checkout reclamation, aged artifact deletion, aged experiment deletion and
+warnings. Scheduled cache cleanup and reclamation default on; aged artifact and
+experiment deletion default off. Disabling the schedule leaves explicit,
+confirmed “Clean up now” available. Disabling reclamation also disables the
+archive-triggered background attempt. Invalid persisted settings fail closed.
+Old successful-completion eligibility markers are retained for state compatibility;
+the production timer no longer uses their 72-hour policy.
 
-Only a successful idle completion with a `turn_started_at` from live admission
-in this daemon run creates it. Old state defaults to `None`. Replaying an old
-completion after restart cannot opt an old thread into cleanup. Admission of a
-new turn, queuing new work, review, or compaction clears prior eligibility.
-Metadata refreshes on reconnect do not cancel an otherwise valid saved marker.
+- Only managed Git worktree variants are eligible. Main project checkouts,
+  shared paths, standalone clones, symlink roots and symlink ancestors stay.
+- Running, waiting, queued and dispatching tasks stay. Both task activity and
+  recursive filesystem modification time must be more than 24 hours old.
+- Dirty variants stay, including untracked files and hidden index flags. Storage
+  shows these tasks for opening, with no deletion buttons.
+- After more than 3 idle days, remove only known ecosystem cache directories
+  which Git ignores and which contain no tracked files: `node_modules`,
+  `DerivedData`, `.next`, `.nuxt`, `.turbo`, Python/PHP/framework caches; anchored
+  `target`, `dist`, `build`, `vendor`, `.venv`, frontend/iOS/Android build roots.
+  `.cache` and arbitrary `build`/`vendor` directories are not a global allowlist.
+- A project may extend cache paths with a **local-only**, declarative JSON list:
+  `git config --local falcondeck.storageCaches '["frontend/.cache"]'`.
+  Only relative paths with no `.`/`..`/`.git` components are accepted. No project
+  script is executed. Additional paths still need the same ignored/untracked,
+  activity, process and age checks; configuration cannot override safety.
+- Clean archived variants, or variants idle more than 14 days, use the shared
+  reclamation assessment and finish path below. Live remote verification remains
+  mandatory: a branch with unpushed/unmerged commits stays. Branches, task history
+  and sparse recipes are retained for restore.
+- Artifacts and experiments with no descendant modified within 30 days appear
+  as candidates. Deletion needs the corresponding opt-in. Git repositories,
+  main/managed checkout paths, symlinks, recent files and active-process paths
+  stay even after opt-in; Git-containing experiments require manual review.
+- Native Codex workspace databases and file logs are report-only. The job never
+  deletes or compacts them, and never invokes a repository's GC apply script.
 
-A five-minute tick checks storage and starts at most one cleanup worker. That
-worker considers at most four **due saved markers**, not every checkout. It
-requires the same completion marker, idle status, no pins, no queued or
-in-dispatch request, and all safety rules below. A refusal backs off for six
-hours; successful removal clears the marker. Changes are persisted. Remote
-checks cannot stall the separate periodic disk check.
+Scans and cache/artifact removal run on dedicated background-QoS threads on
+macOS; Git checks/removal run at nice 10. Network work happens outside task
+admission gates. Reclamation repeats state, local Git and process checks under
+the task gate; cache deletion holds the same gate and rechecks before removal.
+External writers which do not use daemon gates can still race filesystem checks.
 
-Installing this version does not create markers for existing threads. There is
-no filesystem inventory or sweep of existing variants at startup or on ticks.
-The first real GC run over the existing backlog remains a human decision after
-a dry-run report. No real variants were changed during this work.
+The log retains 30 runs, each with an id, start/finish time and up to 100 bounded
+result entries. A start without a finish identifies an interrupted run. Log
+writes precede cleanup; failure to persist the audit prevents new deletion.
+
+### Storage settings and local API
+
+Mac Settings → Storage shows category/project allocated totals, largest managed
+variants with task age/status, aged artifact/experiment candidates and recent
+runs. Categories include unmanaged worktrees, bot homes and other data under
+Other. Cache/content subtotals are parts of Variants, not additional disk use.
+APFS shared extents mean allocated totals are estimates, not physical recovery.
+
+All destructive UI actions require explicit confirmation. Dirty/running tasks
+can only be opened. Cache clearing and reclaiming are available individually for
+eligible clean rows, and Clean up now runs the scheduled policy. Restoring a
+reclaimed task continues to use the existing branch/recipe path.
+
+Local endpoints: `GET /api/storage`, `GET/PATCH /api/storage/preferences`,
+`POST /api/storage/cleanup` (`confirmed: true`), and `POST /api/storage/variant`
+(`workspace_id`, `thread_id`, `action: clear_caches|reclaim`, `confirmed: true`).
+`GET /api/health` adds nullable `free_bytes`, measured by statvfs without a disk
+inventory; bots can check it cheaply. These are local daemon APIs, not new relay,
+pairing or device operations.
 
 ### Safety checks shared with scripts/worktree-gc.mjs
 
@@ -251,12 +301,15 @@ savings remain unverified. No further heavy Quizgecko measurement was performed.
 Use available bytes/statvfs for physical changes; du counts cloned extents in
 full.
 
-Before isolated creation/admission and every five minutes, check available space
-on the FalconDeck data volume. Below **25 GiB**, record a global notification in
-the notification centre, visible across projects, without a push on every check.
-The crossing key is kept beside daemon state and reused across restarts, so
-repeated low checks deduplicate. Re-arm only at **30 GiB or above**, resolving
-the prior crossing. This hysteresis avoids warnings flapping near 25 GiB.
+Before isolated creation/admission and every five minutes, measure free space
+on the daemon data volume. Below **30 GiB**, Mac shows a toast with a “Free up
+space” action opening Storage. At **15 GiB or above** the persistent critical
+banner clears; below **15 GiB** the banner stays and the Mac attempts at most
+one system notification per local calendar day, with a persisted daily claim.
+The daemon's notification centre deduplicates critical notices per UTC day;
+StoragePressure owns native Mac delivery to avoid double alerts. Storage warnings
+have their own off switch. At 30 GiB or above the low crossing rearms. Unknown
+measurements do not invent a zero-byte reading or clear the last known banner.
 
 ### Inventory reliability
 

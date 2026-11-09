@@ -29,6 +29,7 @@ import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
 import { ComputerUsePanel } from "./settings/ComputerUsePanel";
 import { AnalyticsPanel } from "./settings/AnalyticsPanel";
+import { StoragePanel } from "./settings/StoragePanel";
 import { BackupPanel } from "./settings/BackupPanel";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
@@ -167,7 +168,9 @@ export function SettingsView(props: SettingsViewProps) {
         className="min-h-0 flex-1 overflow-y-auto px-8 py-10"
       >
         <div className="mx-auto w-full max-w-4xl">
-          {activeSection === "appearance" ? (
+          {activeSection === "storage" ? (
+            <StoragePanel baseUrl={props.baseUrl} onOpenThread={props.onOpenThread} />
+          ) : activeSection === "appearance" ? (
             <AppearanceSettingsPanel />
           ) : activeSection === "keyboard" ? (
             <KeyboardShortcutsPanel />

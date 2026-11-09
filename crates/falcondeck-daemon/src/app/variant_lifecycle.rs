@@ -1,4 +1,4 @@
-//! Event-driven variant cleanup. Never inventories existing threads at startup.
+//! Checkout admission gates, restore, disk warnings and the storage maintenance timer.
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -237,7 +237,7 @@ impl AppState {
                 }
                 let cleanup = app.clone();
                 app.spawn_background_task(async move {
-                    cleanup.variant_maintenance_tick(Utc::now()).await;
+                    cleanup.storage_daily_tick().await;
                     cleanup
                         .inner
                         .variant_reap_tick_running
@@ -325,10 +325,7 @@ impl AppState {
     }
 
     pub(super) async fn check_variant_disk(&self, workspace_id: &str) {
-        let Some(home) = std::env::var_os("HOME") else {
-            return;
-        };
-        let path = std::path::PathBuf::from(home).join(".falcondeck");
+        let path = self.storage_root();
         let Some(bytes) = crate::variant::available_disk(&path).await else {
             return;
         };
@@ -349,37 +346,68 @@ impl AppState {
             self.inner.variant_disk_low.store(false, Ordering::Relaxed);
             return;
         }
-        if bytes >= 25 * 1024 * 1024 * 1024 {
+        if !self
+            .storage_preferences()
+            .await
+            .map(|p| p.warnings)
+            .unwrap_or(false)
+        {
             return;
         }
-        let key = match tokio::fs::read_to_string(&marker).await {
-            Ok(key) => key,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let key = format!("storage-pressure:{}", Uuid::new_v4());
-                if let Some(parent) = marker.parent() {
-                    if tokio::fs::create_dir_all(parent).await.is_err() {
+        let critical = super::workspace_storage::disk_level(bytes) == "critical";
+        let key = if critical {
+            format!("storage-critical:{}", Utc::now().date_naive())
+        } else {
+            match tokio::fs::read_to_string(&marker).await {
+                Ok(key) => key,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let key = format!("storage-pressure:{}", Uuid::new_v4());
+                    if let Some(parent) = marker.parent() {
+                        if tokio::fs::create_dir_all(parent).await.is_err() {
+                            return;
+                        }
+                    }
+                    let temp = marker.with_extension(format!("{}.tmp", Uuid::new_v4()));
+                    if tokio::fs::write(&temp, &key).await.is_err() {
                         return;
                     }
+                    if tokio::fs::rename(&temp, &marker).await.is_err() {
+                        let _ = tokio::fs::remove_file(temp).await;
+                        return;
+                    }
+                    key
                 }
-                let temp = marker.with_extension(format!("{}.tmp", Uuid::new_v4()));
-                if tokio::fs::write(&temp, &key).await.is_err() {
-                    return;
-                }
-                if tokio::fs::rename(&temp, &marker).await.is_err() {
-                    let _ = tokio::fs::remove_file(temp).await;
-                    return;
-                }
-                key
+                Err(_) => return,
             }
-            Err(_) => return,
         };
-        let result = self.inner.notifications.record(crate::notification_store::NewNotification {
-            kind: NotificationKind::AgentNotice,
-            title: "Storage is running low".into(),
-            preview: format!("{:.1} GiB available. Review retained isolated checkouts before creating more.", bytes as f64 / 1073741824.0),
-            body: None, bot: None, thread_id: None, workspace_id: None, target: None,
-            importance: NotificationImportance::Normal, dedupe_key: Some(key), coalesce: false, sender: None,
-        }, Utc::now()).await;
+        let result = self
+            .inner
+            .notifications
+            .record(
+                crate::notification_store::NewNotification {
+                    kind: NotificationKind::AgentNotice,
+                    title: "Storage is running low".into(),
+                    preview: format!(
+                        "{:.1} GiB available. Open Settings → Storage to free up space.",
+                        bytes as f64 / 1073741824.0
+                    ),
+                    body: None,
+                    bot: None,
+                    thread_id: None,
+                    workspace_id: None,
+                    target: None,
+                    importance: if critical {
+                        NotificationImportance::High
+                    } else {
+                        NotificationImportance::Normal
+                    },
+                    dedupe_key: Some(key),
+                    coalesce: false,
+                    sender: None,
+                },
+                Utc::now(),
+            )
+            .await;
         self.inner.variant_disk_low.store(true, Ordering::Relaxed);
         if matches!(result, crate::notification_store::Recorded::Created(_)) {
             self.emit_notifications_changed().await;

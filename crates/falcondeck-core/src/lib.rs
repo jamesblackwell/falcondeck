@@ -7,6 +7,7 @@
 
 /// Local activity analytics; never sent over the relay.
 pub mod analytics;
+pub mod storage;
 pub use analytics::*;
 /// Backup and restore protocol types.
 pub mod backup;
@@ -2380,6 +2381,9 @@ pub struct ThreadTokenUsage {
 /// Health-check response for daemon HTTP endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
+    /// Available bytes on the daemon data volume; unknown when measurement fails.
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
     /// Whether the service considers itself healthy.
     pub ok: bool,
     /// Build or application version reported by the daemon.

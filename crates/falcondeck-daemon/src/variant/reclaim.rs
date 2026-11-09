@@ -126,7 +126,14 @@ pub(crate) async fn finish_reclaim(
     {
         return Reclaim::Kept(vec![format!("could not preserve checkout setup: {e}")]);
     }
-    if let Err(error) = run_git(project_path, &["worktree", "remove", &variant.path]).await {
+    if let Err(error) = git(
+        project_path,
+        &["worktree", "remove", &variant.path],
+        &[],
+        FETCH_TIMEOUT,
+    )
+    .await
+    {
         return Reclaim::Kept(vec![format!("git worktree remove refused: {error}")]);
     }
     let _ = run_git(project_path, &["worktree", "prune"]).await;
@@ -256,7 +263,7 @@ async fn checkout_identity(variant: &ThreadVariant) -> Vec<String> {
     }
 }
 
-pub(super) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, String> {
+pub(crate) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, String> {
     let mut reasons = Vec::new();
     let files = git(path, &["ls-files", "-v", "-z"], &[], REMOTE_TIMEOUT).await?;
     for entry in files.split('\0').filter(|e| e.len() > 2) {
@@ -373,7 +380,7 @@ fn is_rebuildable(entry: &str) -> bool {
 /// Check accessible process cwd and open files from one lsof inventory. An
 /// inventory failure blocks removal, but OS permissions can hide other users'
 /// descriptors even when lsof succeeds. This cannot prove global inactivity.
-pub(super) async fn process_clear(path: &Path) -> Result<(), String> {
+pub(crate) async fn process_clear(path: &Path) -> Result<(), String> {
     let path = fs::canonicalize(path)
         .await
         .map_err(|e| format!("process check: {e}"))?;
@@ -682,7 +689,8 @@ async fn git(
     env: &[(&str, &str)],
     deadline: Duration,
 ) -> Result<String, String> {
-    let mut command = Command::new("git");
+    let mut command = Command::new("nice");
+    command.args(["-n", "10", "git"]);
     command
         .args(args)
         .current_dir(cwd)

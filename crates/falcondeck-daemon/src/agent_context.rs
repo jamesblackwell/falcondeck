@@ -223,6 +223,7 @@ pub fn append_instructions(
          - Link tasks as [Task name](falcondeck://thread/THREAD_ID), using the returned id, never a title or guessed ID.\n\
          - For settings, reviews and automations: falcondeck_search (detail: \"full\" before executing), falcondeck_get, falcondeck_execute. Read schemas and worked examples first. Conversation follow-ups use thread kind current; managed threads are for unrelated standing schedules.\n",
     );
+    text.push_str("- Before finishing, remove temporary worktrees, target dirs and /tmp outputs you created; keep only artifacts linked in your report.\n");
     if suggest_follow_ups {
         text.push_str("- If useful next steps remain, call falcondeck_suggest_follow_ups once (1–5 imperative labels, max 30 characters); never mention, list, or restate them in your reply.\n");
     }

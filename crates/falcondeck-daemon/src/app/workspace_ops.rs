@@ -1644,6 +1644,7 @@ pub(super) async fn reclaim_archived_variant(
     // Archive may race background dependency provisioning. Wait outside the
     // gate, then re-check archive/activity before any removal.
     let _ = crate::variant::wait_dependencies(&variant.path).await;
+    if Utc::now().signed_duration_since(activity).num_seconds() <= 86400 || !app.storage_archive_allowed(&workspace_path, &variant).await { return None; }
     let assessment = crate::variant::assess(&workspace_path, &variant).await;
     let gate = app.variant_gate(workspace_id, thread_id).await;
     let _guard = gate.lock().await;
@@ -1655,6 +1656,7 @@ pub(super) async fn reclaim_archived_variant(
             || matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
             || !t.queued_requests.is_empty() || !t.summary.queued_turns.is_empty() || t.dispatching_request.is_some() { return None; }
     }
+    if !app.storage_archive_allowed(&workspace_path, &variant).await { return None; }
     let outcome = match assessment {
         Ok(ticket) => crate::variant::finish_reclaim(&workspace_path, &variant, ticket).await,
         Err(result) => result,
@@ -9515,9 +9517,9 @@ mod tests {
         completed.send(Some(Vec::new())).unwrap();
         assert_eq!(
             archived.await.unwrap(),
-            Some(crate::variant::Reclaim::Removed)
+            None
         );
-        assert!(!std::path::Path::new(&f.variant.path).exists());
+        assert!(std::path::Path::new(&f.variant.path).exists());
     }
 
     #[tokio::test]
@@ -9668,4 +9670,165 @@ mod tests {
         }
     }
 
+    fn age_storage_tree(path: &std::path::Path) {
+        if path.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                age_storage_tree(&entry.unwrap().path());
+            }
+        }
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 86400))
+            .unwrap();
+    }
+    async fn storage_fixture() -> VariantFixture {
+        let f = VariantFixture::new().await;
+        std::fs::write(
+            f.project.join(".git/info/exclude"),
+            "node_modules/\ntarget/\n",
+        )
+        .unwrap();
+        std::fs::create_dir(std::path::Path::new(&f.variant.path).join("node_modules")).unwrap();
+        std::fs::write(
+            std::path::Path::new(&f.variant.path).join("node_modules/cache"),
+            "cache",
+        )
+        .unwrap();
+        age_storage_tree(std::path::Path::new(&f.variant.path));
+        f.app
+            .with_managed_thread_mut("workspace-1", "thread-1", |t| {
+                t.summary.updated_at = Utc::now() - chrono::Duration::days(20)
+            })
+            .await
+            .unwrap();
+        f
+    }
+    #[tokio::test]
+    async fn storage_policy_protects_dirty_running_queued_and_recent_variants() {
+        for reason in ["dirty", "untracked", "running", "queued", "recent"] {
+            let f = storage_fixture().await;
+            let path = std::path::Path::new(&f.variant.path);
+            match reason {
+                "dirty" => std::fs::write(path.join("a.txt"), "edited").unwrap(),
+                "untracked" => std::fs::write(path.join("authored.txt"), "keep").unwrap(),
+                "running" => {
+                    f.app
+                        .with_thread_mut("workspace-1", "thread-1", |t| {
+                            t.status = ThreadStatus::Running
+                        })
+                        .await
+                        .unwrap();
+                }
+                "queued" => {
+                    let request: SendTurnRequest=serde_json::from_value(serde_json::json!({"workspace_id":"workspace-1","thread_id":"thread-1","inputs":[{"type":"text","text":"queued"}]})).unwrap();
+                    try_enqueue_turn(&f.app, &request, &request.inputs, None, true, true)
+                        .await
+                        .unwrap();
+                    f.app
+                        .with_thread_mut("workspace-1", "thread-1", |t| {
+                            t.updated_at = Utc::now() - chrono::Duration::days(20)
+                        })
+                        .await
+                        .unwrap();
+                }
+                _ => std::fs::write(path.join("node_modules/cache"), "recent").unwrap(),
+            }
+            f.app.storage_cleanup(true).await.unwrap();
+            assert!(path.join("node_modules/cache").exists(), "{reason}");
+            assert!(path.join("a.txt").exists(), "{reason}");
+        }
+    }
+    #[tokio::test]
+    async fn storage_policy_clears_only_ignored_caches_and_reclaims_archived_or_old_clean_checkouts()
+     {
+        use falcondeck_core::storage::StoragePreferences;
+        let f = storage_fixture().await;
+        f.app
+            .update_storage_preferences(StoragePreferences {
+                reclaim_checkouts: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(
+            !std::path::Path::new(&f.variant.path)
+                .join("node_modules")
+                .exists()
+        );
+        assert!(std::path::Path::new(&f.variant.path).join("a.txt").exists());
+        for archived in [false, true] {
+            let f = storage_fixture().await;
+            if archived {
+                f.app
+                    .with_thread_mut("workspace-1", "thread-1", |t| {
+                        t.is_archived = true;
+                        t.updated_at = Utc::now() - chrono::Duration::days(2);
+                    })
+                    .await
+                    .unwrap();
+            }
+            f.app.storage_cleanup(true).await.unwrap();
+            assert!(
+                !std::path::Path::new(&f.variant.path).exists(),
+                "archived={archived}"
+            );
+            assert!(
+                f.app
+                    .thread_summary("workspace-1", "thread-1")
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                !VariantFixture::git_at(
+                    &f.project,
+                    &[
+                        "show-ref",
+                        "--verify",
+                        &format!("refs/heads/{}", f.variant.branch)
+                    ]
+                )
+                .is_empty()
+            );
+            assert!(
+                crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn storage_old_artifacts_need_opt_in_and_main_projects_are_protected() {
+        use falcondeck_core::storage::StoragePreferences;
+        let f = storage_fixture().await;
+        let artifact = f.root.path().join("artifacts/old");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join("report"), "keep").unwrap();
+        fn old(p: &std::path::Path) {
+            if p.is_dir() {
+                for e in std::fs::read_dir(p).unwrap() {
+                    old(&e.unwrap().path());
+                }
+            }
+            std::fs::File::open(p)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400),
+                )
+                .unwrap();
+        }
+        old(&artifact);
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(artifact.exists());
+        f.app
+            .update_storage_preferences(StoragePreferences {
+                delete_old_artifacts: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(!artifact.exists());
+        assert!(f.project.join("a.txt").exists());
+    }
 }

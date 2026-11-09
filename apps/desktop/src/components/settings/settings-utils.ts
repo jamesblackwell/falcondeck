@@ -29,6 +29,7 @@ import {
 import type { AppUpdaterState } from "../../hooks/useAppUpdater";
 
 export type SettingsSectionId =
+  | "storage"
   | "general"
   | "appearance"
   | "notifications"
@@ -73,6 +74,7 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
   {
     label: "App",
     items: [
+      { id: "storage", label: "Storage", description: "Disk use and workspace cleanup", icon: Archive, settings: ["Disk usage", "Projects", "Cleanup policy", "Largest variants", "30-day candidates"], keywords: ["disk", "free space", "cache", "cleanup"] },
       {
         id: "general",
         label: "General",

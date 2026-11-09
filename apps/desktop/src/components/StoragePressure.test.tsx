@@ -1,0 +1,30 @@
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { StoragePressure } from './StoragePressure';
+const api = vi.hoisted(() => ({ health: vi.fn(), preferences: vi.fn() }));
+vi.mock('@falcondeck/client-core', async importOriginal => ({ ...await importOriginal<object>(), storageClient: () => api }));
+vi.mock('../desktop-notifications', () => ({ sendDesktopAttentionNotification: vi.fn().mockResolvedValue(true) }));
+import { sendDesktopAttentionNotification } from '../desktop-notifications';
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); api.preferences.mockResolvedValue({ warnings: true }); });
+afterEach(() => vi.useRealTimers());
+it('shows a low-disk toast with a Storage action, then a persistent critical banner', async () => {
+  api.health.mockResolvedValue({ free_bytes: 29 * 2 ** 30 }); const toast = vi.fn(); const open = vi.fn();
+  const view = render(<StoragePressure baseUrl="http://daemon" onToast={toast} onOpenStorage={open} />);
+  await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+  toast.mock.calls[0][0].action.onClick(); expect(open).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument(); view.unmount();
+  api.health.mockResolvedValue({ free_bytes: 14 * 2 ** 30 });
+  render(<StoragePressure baseUrl="http://daemon" onToast={toast} onOpenStorage={open} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('14.0 GiB');
+  fireEvent.click(screen.getByRole('button', { name: 'Free up space' })); expect(open).toHaveBeenCalledTimes(2);
+});
+it('limits native critical notifications across remounts and honours the off switch', async () => {
+  api.health.mockResolvedValue({ free_bytes: 14 * 2 ** 30 }); const toast = vi.fn(); const open = vi.fn();
+  const first = render(<StoragePressure baseUrl="http://daemon" onToast={toast} onOpenStorage={open} />);
+  await waitFor(() => expect(sendDesktopAttentionNotification).toHaveBeenCalledTimes(1)); first.unmount();
+  const second = render(<StoragePressure baseUrl="http://daemon" onToast={toast} onOpenStorage={open} />);
+  await screen.findByRole('alert'); expect(sendDesktopAttentionNotification).toHaveBeenCalledTimes(1); second.unmount();
+  api.preferences.mockResolvedValue({ warnings: false });
+  await act(async () => { render(<StoragePressure baseUrl="http://daemon" onToast={toast} onOpenStorage={open} />); });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(sendDesktopAttentionNotification).toHaveBeenCalledTimes(1);
+});

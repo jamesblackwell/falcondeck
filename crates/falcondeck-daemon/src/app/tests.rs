@@ -9764,6 +9764,12 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
         &["commit", "-m", "local only"],
     );
 
+    fn age_tree(p: &std::path::Path) {
+        if p.is_dir() {for e in std::fs::read_dir(p).unwrap() {age_tree(&e.unwrap().path());}}
+        std::fs::File::open(p).unwrap().set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(2*86400)).unwrap();
+    }
+    age_tree(std::path::Path::new(&safe.path));
+    age_tree(std::path::Path::new(&unpushed.path));
     let app = AppState::new_with_state_path(
         "test".to_string(),
         HashMap::new(),
@@ -9782,7 +9788,7 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
         handoff_from: None,
         origin: None,
         status: ThreadStatus::Idle,
-        updated_at: Utc::now(),
+        updated_at: Utc::now()-chrono::Duration::days(2),
         last_message_preview: None,
         last_message_at: None,
         latest_turn_id: None,

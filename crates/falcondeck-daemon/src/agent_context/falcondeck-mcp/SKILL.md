@@ -8,6 +8,8 @@ description: Use FalconDeck session tools for coordination, task outcomes, follo
 This session has FalconDeck MCP tools. Use them when they help with the user's
 task; do not wait for the user to name them.
 
+Before finishing, remove temporary worktrees, target dirs and /tmp outputs you created; keep only artifacts linked in your report.
+
 ## Servers
 
 - `falcondeck` — control plane: `falcondeck_search`, `falcondeck_get`,

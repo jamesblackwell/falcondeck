@@ -21,7 +21,7 @@ mod setup;
 #[cfg(test)]
 pub(crate) use reclaim::test_no_docker_mounts;
 pub use reclaim::{Reclaim, reclaim_if_safe, restore};
-pub(crate) use reclaim::{assess, finish_reclaim};
+pub(crate) use reclaim::{assess, finish_reclaim, process_clear, hidden_or_in_progress};
 pub(crate) use setup::hint as sparse_hint;
 
 /// Untracked files carried into a worktree-backed variant.
