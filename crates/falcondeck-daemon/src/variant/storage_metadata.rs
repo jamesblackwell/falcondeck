@@ -2,6 +2,95 @@
 //! stay in memory/private payloads and never enter Git metadata or logs.
 use std::path::Path;
 
+/// Native Darwin ACLs are separate from xattrs. Export the ordered ACEs and ACL
+/// flags in Apple's portable binary format, without resolving principal names.
+/// Failure to read/serialize or a concurrent identity/security change refuses
+/// preservation; an absent ACL is accepted only for a still-existing object.
+#[cfg(target_os = "macos")]
+pub(super) fn native_acl(path: &Path) -> std::io::Result<Vec<u8>> {
+    const COPYFILE_ACL: u32 = 1 << 0;
+    const COPYFILE_XATTR: u32 = 1 << 2;
+    const COPYFILE_CHECK: u32 = 1 << 16;
+    const COPYFILE_NOFOLLOW_SRC: u32 = 1 << 18;
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    unsafe extern "C" {
+        fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
+        fn acl_size(acl: *mut libc::c_void) -> libc::ssize_t;
+        fn acl_copy_ext(
+            buf: *mut libc::c_void,
+            acl: *mut libc::c_void,
+            size: libc::ssize_t,
+        ) -> libc::ssize_t;
+        fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+        fn copyfile(
+            from: *const libc::c_char,
+            to: *const libc::c_char,
+            state: *mut libc::c_void,
+            flags: u32,
+        ) -> libc::c_int;
+    }
+    let before = std::fs::symlink_metadata(path)?;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let acl = unsafe { acl_get_link_np(name.as_ptr(), 0x100) }; // ACL_TYPE_EXTENDED, no follow
+    let bytes = if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOENT) {
+            return Err(error);
+        }
+        // Darwin also uses ENOENT for an absent ACL. CHECK alone returns zero
+        // for missing paths, so lstat identity checks on both sides are required.
+        // Request XATTR too, or Darwin reports quarantine metadata via ACL.
+        let flags = unsafe {
+            copyfile(
+                name.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                COPYFILE_CHECK | COPYFILE_ACL | COPYFILE_XATTR | COPYFILE_NOFOLLOW_SRC,
+            )
+        };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if (flags as u32) & COPYFILE_ACL != 0 {
+            return Err(std::io::Error::other("Private ACL changed while reading"));
+        }
+        Vec::new()
+    } else {
+        let result = (|| {
+            let size = unsafe { acl_size(acl) };
+            if size < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if size > 64 * 1024 {
+                return Err(std::io::Error::other("Private ACL exceeds limit"));
+            }
+            let mut bytes = vec![0u8; size as usize];
+            let written = unsafe { acl_copy_ext(bytes.as_mut_ptr().cast(), acl, size) };
+            if written < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if written != size {
+                return Err(std::io::Error::other(
+                    "Private ACL serialization changed size",
+                ));
+            }
+            Ok(bytes)
+        })();
+        unsafe {
+            acl_free(acl);
+        }
+        result?
+    };
+    let after = std::fs::symlink_metadata(path)?;
+    let identity = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
+    if identity(&before) != identity(&after) {
+        return Err(std::io::Error::other(
+            "Private ACL object changed while reading",
+        ));
+    }
+    Ok(bytes)
+}
+
 // Linux stores POSIX access/default ACLs as system.posix_acl_* xattrs. Include
 // every readable attribute, not just user.*, and fail closed on unsupported
 // filesystems, oversized metadata or races. Never emit attribute values.
@@ -178,6 +267,36 @@ pub(super) fn cache_rebuildable(path: &Path) -> std::io::Result<bool> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    #[test]
+    fn native_acl_requires_existing_object_and_does_not_follow_links() {
+        use std::os::unix::fs::symlink;
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("file");
+        std::fs::write(&file, "fixture").unwrap();
+        assert!(native_acl(&file).unwrap().is_empty());
+        set_attribute(
+            &file,
+            b"com.apple.quarantine",
+            Some(b"0081;00000000;FalconDeckFixture;"),
+        )
+        .unwrap();
+        assert!(native_acl(&file).unwrap().is_empty());
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "user:nobody deny read"])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(!native_acl(&file).unwrap().is_empty());
+        let link = t.path().join("link");
+        symlink(&file, &link).unwrap();
+        assert!(native_acl(&link).unwrap().is_empty());
+        std::fs::remove_file(file).unwrap();
+        assert!(native_acl(&link).unwrap().is_empty());
+        assert!(native_acl(&t.path().join("missing")).is_err());
+    }
     #[test]
     fn cache_proof_keeps_acl_bearing_files_and_directories() {
         let t = tempfile::tempdir().unwrap();

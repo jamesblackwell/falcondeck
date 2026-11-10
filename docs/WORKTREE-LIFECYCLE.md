@@ -239,8 +239,18 @@ Before purge, unique ignored data is cloned into a mode-0700 sibling vault on
 that volume, outside Git. A mode-0600 private manifest records paths and content
 fingerprints; shared Git metadata records only the vault pointer. File ownership,
 permissions, ACLs and extended attributes are copied without running project
-code. Linux copies explicitly preserve extended attributes; reconstructed
-ancestor access/default ACLs and other attributes are copied and verified.
+code. On macOS, private fingerprints include the native ACL's ordered entries
+and flags using `acl_get_link_np`/`acl_copy_ext`, separately from xattrs. File
+copies and reused backups must match that fingerprint; reconstructed directory
+ACLs are compared after copying. Missing, unreadable, oversized, changing or mismatched ACL
+metadata refuses preservation and retains the original. macOS clone copies may
+omit native ACLs; such copies fail verification rather than replacing originals. An ACL-only change after
+a completed backup therefore aborts retry rather than reusing stale permissions.
+On Linux, fingerprints compare readable xattrs including exposed POSIX access
+and default ACL attributes; this does not claim verification of other ACL
+representations. Linux copies explicitly preserve extended attributes, and
+reconstructed ancestor attributes are copied and compared. Older macOS backup
+fingerprints without native ACL evidence are refused, keeping originals for review.
 Private payload fingerprints include extended attributes. Cache proof also
 retains unverified attributes and ACLs, including on package directories; only
 macOS-generated provenance metadata is treated as regenerable. Copy and sync failures retain the original quarantine. If a live compiler manifest

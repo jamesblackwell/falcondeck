@@ -41,6 +41,13 @@ async fn fingerprint(path: &Path) -> Result<String, DaemonError> {
             let m = std::fs::symlink_metadata(p)?;
             h.update(m.uid().to_le_bytes());
             h.update(m.gid().to_le_bytes());
+            #[cfg(target_os = "macos")]
+            {
+                let acl = super::storage_metadata::native_acl(p)?;
+                h.update(b"native-macos-acl-v1\0");
+                h.update((acl.len() as u64).to_le_bytes());
+                h.update(acl);
+            }
             let attrs = attributes(p)?;
             h.update((attrs.len() as u64).to_le_bytes());
             for (name, value) in attrs {
@@ -155,6 +162,12 @@ async fn directory_metadata(source: &Path, dest: &Path) -> Result<(), DaemonErro
             std::fs::set_permissions(&b, original.permissions())?;
         }
         copy_attributes(&a, &b)?;
+        #[cfg(target_os = "macos")]
+        if super::storage_metadata::native_acl(&a)? != super::storage_metadata::native_acl(&b)? {
+            return Err(std::io::Error::other(
+                "Private directory ACL could not be preserved",
+            ));
+        }
         let copied = std::fs::symlink_metadata(&b)?;
         if copied.mode() != original.mode()
             || copied.uid() != original.uid()
@@ -898,6 +911,80 @@ async fn copy_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_acl_only_change_refuses_completed_backup_retry_and_keeps_original() {
+        use super::super::storage_metadata::native_acl;
+        let t = tempfile::tempdir().unwrap();
+        let source = t.path().join("source");
+        let vault = t.path().join("vault");
+        std::fs::create_dir(&source).unwrap();
+        let file = source.join("secret");
+        std::fs::write(&file, "PRIVATE_FIXTURE").unwrap();
+        prepare(&source, &vault, &["secret".into()]).await.unwrap();
+        assert!(load(&vault).await.unwrap().complete);
+        let meta = std::fs::symlink_metadata(&file).unwrap();
+        let fields = (meta.mode(), meta.uid(), meta.gid());
+        let attrs = attributes(&file).unwrap();
+        let original_acl = native_acl(&file).unwrap();
+        let before = fingerprint(&file).await.unwrap();
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "user:nobody deny read"])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let meta = std::fs::symlink_metadata(&file).unwrap();
+        assert_eq!((meta.mode(), meta.uid(), meta.gid()), fields);
+        assert_eq!(attributes(&file).unwrap(), attrs);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "PRIVATE_FIXTURE");
+        let restricted = native_acl(&file).unwrap();
+        assert_ne!(restricted, original_acl);
+        assert_ne!(fingerprint(&file).await.unwrap(), before);
+        // Model restart after a completed backup but before original removal.
+        assert!(prepare(&source, &vault, &["secret".into()]).await.is_err());
+        assert!(file.exists());
+        assert_eq!(native_acl(&file).unwrap(), restricted);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "PRIVATE_FIXTURE");
+        assert_eq!(
+            native_acl(&vault.join("files/secret")).unwrap(),
+            original_acl
+        );
+        assert!(!load(&vault).await.unwrap().complete);
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_backup_acl_only_change_is_not_reused() {
+        use super::super::storage_metadata::native_acl;
+        let t = tempfile::tempdir().unwrap();
+        let source = t.path().join("source");
+        let vault = t.path().join("vault");
+        std::fs::create_dir(&source).unwrap();
+        let file = source.join("secret");
+        std::fs::write(&file, "PRIVATE_FIXTURE").unwrap();
+        let paths = ["secret".into()];
+        prepare(&source, &vault, &paths).await.unwrap();
+        let original_acl = native_acl(&file).unwrap();
+        let backup = vault.join("files/secret");
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "user:nobody deny read"])
+                .arg(&backup)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let changed_acl = native_acl(&backup).unwrap();
+        assert_ne!(changed_acl, original_acl);
+        assert!(prepare(&source, &vault, &paths).await.is_err());
+        assert!(file.exists());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "PRIVATE_FIXTURE");
+        assert_eq!(native_acl(&file).unwrap(), original_acl);
+        assert_eq!(native_acl(&backup).unwrap(), changed_acl);
+        assert!(!load(&vault).await.unwrap().complete);
+    }
     #[tokio::test]
     async fn private_attributes_survive_backups_and_reconstructed_cache_ancestors() {
         let t = tempfile::tempdir().unwrap();
