@@ -42,6 +42,7 @@ use falcondeck_core::ToolCallDetail;
 
 mod auth_cache;
 mod history;
+mod model_catalog;
 #[cfg(test)]
 mod hotpath_bench;
 mod stream;
@@ -262,7 +263,7 @@ impl ClaudeRuntime {
 
         let (account, models) = tokio::join!(
             auth_cache::startup_auth_status(&resolved.executable),
-            list_models()
+            model_catalog::list_models_for_bin(&resolved.executable)
         );
         let collaboration_modes = Vec::new();
         let capabilities = default_capabilities();
@@ -936,7 +937,7 @@ impl ClaudeRuntime {
         let resolved = resolve_agent_binary("claude", &self.claude_bin);
         let (account, models) = tokio::join!(
             auth_cache::refresh_auth_status(&resolved.executable),
-            list_models()
+            model_catalog::list_models_for_bin(&resolved.executable)
         );
         ClaudeProviderMetadata {
             account,
@@ -1655,8 +1656,13 @@ async fn read_additional_model_options() -> Vec<DiscoveredClaudeModel> {
     parse_additional_model_options(&value)
 }
 
-/// Picker catalog: curated aliases plus any extra ids the CLI config advertises.
+/// Machine catalog, also used by lazy workspace placeholders on mobile.
 pub async fn list_models() -> Vec<ModelSummary> {
+    let resolved = resolve_agent_binary("claude", "claude");
+    model_catalog::list_models_for_bin(&resolved.executable).await
+}
+
+async fn fallback_models() -> Vec<ModelSummary> {
     let extras = read_additional_model_options().await;
     merge_claude_models(curated_models(), &extras)
 }

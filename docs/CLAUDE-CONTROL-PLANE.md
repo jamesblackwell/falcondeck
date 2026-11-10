@@ -25,9 +25,22 @@ from March 2026 docs.
 
 ## Phase mapping
 
+### Native catalog update (2026-11-09, Claude Code 2.1.321)
+
+The `initialize` **control response** contains `models` with `value`,
+`displayName`, and `resolvedModel`; this is distinct from the `system` init
+event in the original probe. Lazy workspace placeholders, connection, and metadata refresh now
+query this catalog through `claude -p` stream-json without a user message or
+model generation. The probe disables project configuration, hooks, plugins,
+MCP servers, and session persistence. It is bounded to ten seconds and shared
+across workspaces for sixty seconds; replacing the executable invalidates it
+immediately. Live labels override curated aliases and their full-context
+variants, and additional advertised IDs are appended. The local config and
+curated catalog remain the fallback for older or unavailable CLIs.
+
 | Phase | Gate from this probe | Status |
 |---|---|---|
-| 1 Live picker catalog | Always (curated ∩ extras; no CLI list command) | In progress |
+| 1 Live picker catalog | Native `initialize` control response, local fallback | Implemented |
 | 2 Native fork via `ProviderRuntime` | `--fork-session` is fork-at-end, not a turn checkpoint | Blocked for `supports_forking` / retry-from-here. Codex-only `fork_thread` dispatch cleanup can still land. |
 | 3 Approvals / questions / plan | Path B (no `--permission-prompt-tool`) | AskUserQuestion and ExitPlanMode are first-class cards on the PreToolUse hook. They are never auto-allowed. Plan approval restores the pre-plan permission mode (or `acceptEdits`). |
 | 4 Long-lived CLI process | stdin-after-result works | Park after a successful `result` and reuse stdin when cwd/model/effort/permission/hooks/MCP still match. Mismatch or a failed turn still `--resume`s. |
