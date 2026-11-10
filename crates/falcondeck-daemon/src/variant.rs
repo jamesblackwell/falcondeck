@@ -19,6 +19,9 @@ use crate::error::DaemonError;
 mod reclaim;
 pub(crate) mod quarantine;
 pub(crate) mod cache;
+pub(crate) mod cache_index;
+pub(crate) mod private_store;
+mod storage_metadata;
 pub(crate) mod snapshot;
 mod setup;
 #[cfg(test)]
@@ -238,6 +241,7 @@ async fn populate_worktree_mode(
         populated(&stage).await.map_err(DaemonError::Rpc)?;
         let restored_snapshot=snapshot::apply_pending(project,slug,&stage).await?;
         if restored_snapshot {copy_allowlist_filtered(project,&staging,true).await;} else {copy_untracked_allowlist(project, &staging).await;}
+        private_store::restore(project,slug,&staging).await?;
         setup::save_setup(project, slug, &staging, setup.clone()).await?;
         let destination_text=destination.to_string_lossy();
         let mut args=vec!["worktree","move"];

@@ -9715,13 +9715,31 @@ mod tests {
             "node_modules/\ntarget/\n",
         )
         .unwrap();
-        let path=std::path::Path::new(&f.variant.path);
-        std::fs::write(path.join("package.json"),"{}").unwrap();
-        VariantFixture::git_at(path,&["add","package.json"]);VariantFixture::git_at(path,&["commit","-m","package manifest"]);
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join("package.json"), "{}").unwrap();
+        VariantFixture::git_at(path, &["add", "package.json"]);
+        VariantFixture::git_at(path, &["commit", "-m", "package manifest"]);
         std::fs::create_dir_all(path.join("node_modules/example")).unwrap();
-        std::fs::write(path.join("node_modules/.package-lock.json"),r#"{"packages":{"node_modules/example":{}}}"#).unwrap();
-        std::fs::write(path.join("node_modules/example/package.json"),r#"{"name":"example"}"#).unwrap();
-        std::fs::write(path.join("node_modules/example/cache.js"),"cache").unwrap();
+        std::fs::write(
+            path.join("node_modules/.package-lock.json"),
+            r#"{"packages":{"node_modules/example":{}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("node_modules/example/package.json"),
+            r#"{"name":"example"}"#,
+        )
+        .unwrap();
+        std::fs::write(path.join("node_modules/example/cache.js"), "cache").unwrap();
+        std::fs::write(
+            path.join("node_modules/example/unchanged.js"),
+            "cache payload",
+        )
+        .unwrap();
+        crate::variant::cache_index::test_catalog(
+            &path.join("node_modules"),
+            &f.root.path().join("store"),
+        );
         age_storage_tree(std::path::Path::new(&f.variant.path));
         age_storage_tree(&f.project.join(".git"));
         f.app
@@ -9813,7 +9831,7 @@ mod tests {
         f.app.storage_cleanup(true).await.unwrap();
         assert!(
             !std::path::Path::new(&f.variant.path)
-                .join("node_modules")
+                .join("node_modules/example/cache.js")
                 .exists()
         );
         assert!(std::path::Path::new(&f.variant.path).join("a.txt").exists());
@@ -9919,7 +9937,7 @@ mod tests {
         let completed = f.app.inner.storage_gate.lock().await;
         drop(completed);
         assert!(
-            !cache.exists(),
+            !cache.join("example/cache.js").exists(),
             "cleanup result: {}",
             std::fs::read_to_string(f.root.path().join("storage-runs.json")).unwrap_or_default()
         );
@@ -9934,9 +9952,17 @@ mod tests {
         std::fs::write(path.join("a.txt"), "old dirty edit").unwrap();
         std::fs::write(path.join("authored.txt"), "old untracked work").unwrap();
         age_storage_tree(path);
-        std::fs::write(path.join("node_modules/example/cache.js"), "recent cache activity").unwrap();
+        std::fs::write(
+            path.join("node_modules/example/cache.js"),
+            "recent cache activity",
+        )
+        .unwrap();
         f.app.storage_cleanup(true).await.unwrap();
-        assert!(!path.join("node_modules").exists());
+        assert_eq!(
+            std::fs::read_to_string(path.join("node_modules/example/cache.js")).unwrap(),
+            "recent cache activity"
+        );
+        assert!(!path.join("node_modules/example/unchanged.js").exists());
         assert_eq!(
             std::fs::read_to_string(path.join("a.txt")).unwrap(),
             "old dirty edit"
@@ -10256,7 +10282,7 @@ mod tests {
         let report = f.app.storage_report().await.unwrap();
         assert!(report.variants[0].cache_blocked.is_none());
         f.app.storage_cleanup(true).await.unwrap();
-        assert!(!path.join("node_modules").exists());
+        assert!(!path.join("node_modules/example/cache.js").exists());
         assert!(path.join("a.txt").exists());
         assert!(!path.join("omitted").exists());
         assert_eq!(

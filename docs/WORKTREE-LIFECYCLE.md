@@ -178,17 +178,18 @@ keys for it are accepted for compatibility, ignored, and omitted when saved.
   Its 24-hour recency test uses tracked/non-ignored files and thread activity,
   rather than mtimes inside the cache. Sparse omissions are not deletions;
   genuinely deleted tracked paths use their nearest surviving parent for activity.
-- An ignored name alone never grants deletion authority. The current exact cache
+- An ignored name alone never grants deletion authority. The exact cache
   locations are `node_modules`, `frontend/node_modules`, `target` and
-  `frontend/target`. Node installs need installed-package receipts and manifests;
-  pnpm receipts must match project lock input; supported command shims must match
-the generated template and a manifest-declared installed binary. Extra authored
-shim content is retained. Rust caches require Cargo input,
-  a rustc receipt and CACHEDIR.TAG, with known generated layout and positive
-compiler artifact/metadata formats. Unknown target descendants are retained. Unknown package
-  roots, nested Git state, databases (including SQLite headers), private key/env
-  files, special files and authored Rust-target content are refused. Generic
-  `build`, `.cache`, `dist` and `vendor` paths are not disposable merely by name.
+  `frontend/target`. Node package files need a matching content digest, size and
+  mode in a supported pnpm store receipt, including recorded build side effects.
+  Installer metadata, shims, links, missing receipts, edited files and additions
+  remain recoverable. Timestamps alone never prove a file disposable. Receipt,
+  manifest and package reads are bounded and reject symlinks/special files with
+  nonblocking, no-follow opens. Rust caches
+  require Cargo input, a rustc receipt, CACHEDIR.TAG and positively recognised
+  compiler artifacts. Unknown descendants, nested Git state, databases, private
+  configuration and special files are retained. Generic `build`, `.cache`, `dist`
+  and `vendor` paths are not disposable merely by name.
 - A local-only project hook can restrict the supported exact cache list:
   `git config --local falcondeck.storageCaches '["frontend/node_modules"]'`.
   Nonempty lists select those supported locations; an absent/empty list uses
@@ -197,7 +198,10 @@ compiler artifact/metadata formats. Unknown target descendants are retained. Unk
 - Each cache must additionally be ignored, contain no tracked descendants and
   pass containment/identity/process checks. The **same content proof** protects
   ignored data during checkout reclamation, including manual dirty snapshots.
-  Differing environment files and other ignored non-cache data block removal.
+  A unique ignored file no longer blocks an entire checkout: retain that file
+  privately and reclaim only Git-recoverable or positively proved cache bytes.
+  Inventory cache totals include unverified candidates; mutation proves each
+  file afresh. A partial dependency cache needs reinstalling before use.
 - Artifacts/experiments older than 30 days are **candidates only**, never
   automatically deleted. Native Codex stores and logs remain report-only.
   No repository GC apply script is invoked.
@@ -230,6 +234,47 @@ rechecks bytes, index, ignored-content proof, identity and processes before purg
 Late writes retain the directory. The task admission gate remains held. Starting
 another task cannot authorize deletion of a running/queued variant. Disabling the
 relevant cache/reclamation switch also retains its pending quarantines.
+
+Before purge, unique ignored data is cloned into a mode-0700 sibling vault on
+that volume, outside Git. A mode-0600 private manifest records paths and content
+fingerprints; shared Git metadata records only the vault pointer. File ownership,
+permissions, ACLs and extended attributes are copied without running project
+code. Linux copies explicitly preserve extended attributes; reconstructed
+ancestor access/default ACLs and other attributes are copied and verified.
+Private payload fingerprints include extended attributes. Cache proof also
+retains unverified attributes and ACLs, including on package directories; only
+macOS-generated provenance metadata is treated as regenerable. Copy and sync failures retain the original quarantine. If a live compiler manifest
+disappears, the cache contents and root permissions are retained privately
+rather than losing the bytes or leaving an unpurgeable quarantine. Content and metadata
+are verified before the manifest is marked complete and removal can proceed.
+Vault directories are created with mode 0700 atomically. ACL hardening also
+runs on every reopen, including interrupted creation. Payload entries are copied
+and synced in private vault temporaries before atomic publication; incomplete
+older copies are retained separately and retried from the verified source.
+Snapshot verification rejects newly appeared non-ignored files before Git add,
+so verification does not store their unexpected contents in Git.
+Private copy temporaries never live in a Git checkout. Ignored non-directory
+files and links at cache-named paths are preserved as ordinary private entries.
+Private filenames are passed to Git as literal paths during restoration. After
+the verified overlay (including ignore rules that are themselves ignored), Git
+must report no untracked non-ignored files under the private roots. Otherwise
+the unpublished stage is refused and the vault retained. No snapshot/Git add
+runs between that overlay and privacy validation. When a
+new sparse default omits an original tracked ancestor `.gitignore`, that file
+is materialized too; intentional tracked deletions are left intact.
+Private vaults are never automatically purged and remain visible in Storage.
+Restore overlays verified private files into a fresh staging checkout before
+publication, refusing tracked-file or destination conflicts and keeping backups.
+Sparse restoration retains private files outside the recipe too. Cache-only
+cleanup syncs unverified files in a private staging directory, records its
+identity, then publishes the complete cache with an exclusive atomic rename.
+A later purge never replays old copies over subsequent edits or deletions.
+Interrupted staging copies are retained privately and rebuilt from the verified
+backup. A published directory's durable identity lets recovery complete after an
+interrupted ready-flag write without overwriting newer edits. Writer-created
+conflicts retain both copies and block admission. Legacy completed quarantines
+without a preservation flag do not block an existing, reinstalled checkout;
+their unverified contents are still privately retained before purge.
 
 Purge writes a `purging` phase before removal. Failure/interruption is reported
 as **RecoveryRequired**, never as an intact **Kept** checkout. Restore does not
@@ -267,7 +312,8 @@ the real index. The snapshot commit pins HEAD, prior snapshots and a separate
 **original index tree** commit. Thus staged version A and working version B both
 remain reachable and restore independently. It includes tracked/untracked
 non-ignored files, deletions, renames and binaries. Ignored unique/private data
-is never silently discarded. Lossy filters, submodules and unsupported paths
+is never silently discarded. Lossy filters, submodules, newly discovered
+untracked nested repositories and unsupported paths
 are refused. Restore verifies the working tree and saved index before publishing;
 sparse omissions and outside-recipe additions are retained. Failed verification
 removes nothing from the original checkout.

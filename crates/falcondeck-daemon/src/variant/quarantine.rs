@@ -19,7 +19,7 @@ async fn run_git(path: &str, args: &[&str]) -> Result<String, DaemonError> {
         .await
         .map_err(DaemonError::Rpc)
 }
-async fn filesystem_job<T: Send + 'static>(
+pub(super) async fn filesystem_job<T: Send + 'static>(
     job: impl FnOnce() -> std::io::Result<T> + Send + 'static,
 ) -> Result<T, DaemonError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -54,6 +54,12 @@ pub(crate) struct Record {
     pub metadata: PathBuf,
     #[serde(default)]
     pub residue: Option<PathBuf>,
+    #[serde(default)]
+    pub private_path: Option<PathBuf>,
+    // None is a deployed legacy cleanup: never replay it over a reinstalled
+    // cache. Purge still preserves any bytes the current proof cannot verify.
+    #[serde(default)]
+    pub cache_private_ready: Option<bool>,
 }
 async fn directory(project: &str) -> Result<PathBuf, DaemonError> {
     Ok(PathBuf::from(
@@ -268,7 +274,10 @@ fn validate(r: &Record) -> Result<(), DaemonError> {
         .ok_or_else(|| DaemonError::Rpc("Invalid quarantine parent".into()))?;
     let prefix = format!(".storage-quarantine-{}-", r.variant.slug);
     let name = r.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if r.path.parent() != Some(parent)
+    if r.private_path
+        .as_ref()
+        .is_some_and(|p| *p != r.path.with_extension("private"))
+        || r.path.parent() != Some(parent)
         || !name.starts_with(&prefix)
         || uuid::Uuid::parse_str(name.strip_prefix(&prefix).unwrap_or("")).is_err()
         || (r.snapshot.is_some() && r.original != checkout)
@@ -314,7 +323,7 @@ fn fingerprint_sync(root: &Path) -> std::io::Result<String> {
                 ));
             }
         } else if m.is_file() {
-            let mut f = std::fs::File::open(p)?;
+            let mut f = super::cache_index::open_regular(p)?;
             let mut bytes = [0; 65536];
             loop {
                 let n = f.read(&mut bytes)?;
@@ -376,11 +385,7 @@ async fn unchanged(r: &Record) -> Result<(), DaemonError> {
             .original
             .strip_prefix(&r.variant.path)
             .map_err(|e| DaemonError::Rpc(e.to_string()))?;
-        super::cache::quarantine_contents_safe(
-            &r.path,
-            relative.to_string_lossy().ends_with("target"),
-        )
-        .map_err(DaemonError::Rpc)?;
+        cache_plan(Path::new(&r.variant.path), relative, &r.path).await?;
     }
     // The potentially long verification must not be the last process check.
     super::process_clear(&r.path)
@@ -466,6 +471,33 @@ async fn rename_source(source: &Path, destination: &Path) -> std::io::Result<()>
     }
     fs::rename(source, destination).await
 }
+async fn cache_plan(
+    checkout: &Path,
+    relative: &Path,
+    physical: &Path,
+) -> Result<super::cache::Partition, DaemonError> {
+    let checkout = checkout.to_owned();
+    let relative = relative.to_string_lossy().into_owned();
+    let physical = physical.to_owned();
+    filesystem_job(move || {
+        let mut part = super::cache::partition(&checkout, &relative, &physical)
+            .map_err(std::io::Error::other)?;
+        if let Some((_, reason)) = part.retained.iter().find(|(p, _)| p.as_os_str().is_empty()) {
+            // A missing live manifest can invalidate an old compiler-cache
+            // receipt. Keep every child, rather than passing an empty path to
+            // private storage or treating the loss of proof as deletion proof.
+            // prepare/copy_retained also preserve the source root's metadata.
+            let reason = reason.clone();
+            part.retained = std::fs::read_dir(&physical)?
+                .map(|e| e.map(|e| (PathBuf::from(e.file_name()), reason.clone())))
+                .collect::<Result<Vec<_>, _>>()?;
+            part.retained.sort_by(|a, b| a.0.cmp(&b.0));
+            part.rebuildable_bytes = 0;
+        }
+        Ok(part)
+    })
+    .await
+}
 pub(crate) async fn stage(
     project: &str,
     variant: &ThreadVariant,
@@ -494,14 +526,30 @@ pub(crate) async fn stage(
             .await?
             .join(format!("{}.quarantine.{id}.json", variant.slug)),
         residue: None,
+        private_path: None,
+        cache_private_ready: Some(false),
     };
     validate(&r)?;
     if r.snapshot.is_none() {
         let rel = source
             .strip_prefix(&variant.path)
             .map_err(|e| DaemonError::Rpc(e.to_string()))?;
-        super::cache::validate(Path::new(&variant.path), &rel.to_string_lossy())
-            .map_err(DaemonError::Rpc)?;
+        let plan = cache_plan(Path::new(&variant.path), rel, source).await?;
+        if plan
+            .retained
+            .iter()
+            .any(|(p, _)| !super::private_store::relative(p))
+        {
+            return Err(DaemonError::Rpc(
+                "Nested Git cache requires checkout-level private preservation; cache untouched"
+                    .into(),
+            ));
+        }
+        if plan.rebuildable_bytes == 0 {
+            return Err(DaemonError::Rpc(
+                "Cache contains no verified rebuildable bytes".into(),
+            ));
+        }
     }
     // Receipt first: failed staging must not leave an authoritative pending snapshot.
     register_project(project, parent).await?;
@@ -533,8 +581,7 @@ pub(crate) async fn stage(
             let rel = source
                 .strip_prefix(&variant.path)
                 .map_err(|e| DaemonError::Rpc(e.to_string()))?;
-            super::cache::validate_at(Path::new(&variant.path), &rel.to_string_lossy(), &r.path)
-                .map_err(DaemonError::Rpc)?;
+            cache_plan(Path::new(&variant.path), rel, &r.path).await?;
         }
         Ok::<_, DaemonError>(())
     }
@@ -566,7 +613,40 @@ pub(crate) async fn stage(
     }
     r.phase = "quarantined".into();
     r.created_at = chrono::Utc::now().timestamp();
-    save(&r).await?;
+    if r.snapshot.is_some() {
+        save(&r).await?;
+    }
+    if r.snapshot.is_none() {
+        let rel = source
+            .strip_prefix(&variant.path)
+            .map_err(|e| DaemonError::Rpc(e.to_string()))?;
+        let plan = cache_plan(Path::new(&variant.path), rel, &r.path).await?;
+        let paths = plan
+            .retained
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect::<Vec<_>>();
+        // Cache-only cleanup keeps authored/private bytes visible in the
+        // original checkout immediately; the old copy also survives grace.
+        if !paths.is_empty() {
+            r.private_path = Some(r.path.with_extension("private"));
+            save(&r).await?;
+            if let Err(e) = super::private_store::publish_cache(
+                &r.path,
+                &r.original,
+                &r.path.with_extension("private"),
+                &paths,
+            )
+            .await
+            {
+                r.phase = "recovery_required".into();
+                save(&r).await?;
+                return Err(e);
+            }
+        }
+        r.cache_private_ready = Some(true);
+        save(&r).await?;
+    }
     Ok(r)
 }
 
@@ -602,8 +682,23 @@ async fn checkout_is_old(path: &Path, now: i64) -> Result<bool, DaemonError> {
 }
 
 pub(crate) async fn purge(r: &Record, now: i64) -> Result<Option<Reclaim>, DaemonError> {
-    if r.phase == "purged" {
+    if matches!(r.phase.as_str(), "purged" | "private_preserved") {
         return Ok(None);
+    }
+    if r.snapshot.is_none() && r.cache_private_ready == Some(false) && r.path.exists() {
+        let rel = r
+            .original
+            .strip_prefix(&r.variant.path)
+            .map_err(|e| DaemonError::Rpc(e.to_string()))?;
+        if !cache_plan(Path::new(&r.variant.path), rel, &r.path)
+            .await?
+            .retained
+            .is_empty()
+        {
+            return Ok(Some(Reclaim::RecoveryRequired(vec![
+                "Interrupted private cache preservation; cache retained".into(),
+            ])));
+        }
     }
     if r.phase == "prepared" && r.path.exists() {
         if r.snapshot.is_some() {
@@ -649,9 +744,12 @@ pub(crate) async fn purge(r: &Record, now: i64) -> Result<Option<Reclaim>, Daemo
         }
         snapshot::verify_recoverable(&r.path.to_string_lossy(), s).await?;
     }
-    // This durable state makes interruption/partial failure distinguishable
-    // from a wholly retained checkout. Restore keeps any residue before replay.
     let mut next = r.clone();
+    ensure_private(&mut next).await?;
+    // Copying private payload must not legitimize a concurrent checkout edit.
+    unchanged(r).await?;
+    // This durable state makes interruption/partial failure distinguishable
+    // from a wholly retained checkout. Restore keeps residue before replay.
     next.phase = "purging".into();
     save(&next).await?;
     let result = remove_quarantined(r).await;
@@ -663,12 +761,42 @@ pub(crate) async fn purge(r: &Record, now: i64) -> Result<Option<Reclaim>, Daemo
             r.path.display()
         )])));
     }
-    next.phase = "purged".into();
+    next.phase = if next.private_path.is_some() {
+        "private_preserved"
+    } else {
+        "purged"
+    }
+    .into();
     save(&next).await?;
-    if r.snapshot.is_none() {
+    if r.snapshot.is_none() && next.private_path.is_none() {
         fs::remove_file(&r.metadata).await?;
     }
     Ok(Some(Reclaim::Removed))
+}
+
+async fn ensure_private(r: &mut Record) -> Result<(), DaemonError> {
+    let paths = if r.snapshot.is_some() {
+        super::private_store::plan(&r.path, Path::new(&r.variant.path)).await?
+    } else {
+        let rel = r
+            .original
+            .strip_prefix(&r.variant.path)
+            .map_err(|e| DaemonError::Rpc(e.to_string()))?;
+        cache_plan(Path::new(&r.variant.path), rel, &r.path)
+            .await?
+            .retained
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    };
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let vault = r.path.with_extension("private");
+    r.private_path = Some(vault.clone());
+    save(r).await?;
+    // Failures retain the intact quarantine and any completed private copies.
+    super::private_store::prepare(&r.path, &vault, &paths).await
 }
 
 #[cfg(test)]
@@ -784,6 +912,46 @@ async fn repair_residue(r: &Record, path: &Path) -> Result<(), DaemonError> {
 
 /// Cancel a pending removal on restore. Damaged residue is never overwritten:
 /// retain it, then let normal snapshot restoration create a fresh checkout.
+pub(crate) async fn recover_caches(
+    project: &str,
+    variant: &ThreadVariant,
+) -> Result<(), DaemonError> {
+    for mut r in records(project).await?.into_iter().filter(|r| {
+        r.variant == *variant
+            && r.snapshot.is_none()
+            && r.cache_private_ready == Some(false)
+            && r.path.exists()
+    }) {
+        super::process_clear(&r.path)
+            .await
+            .map_err(DaemonError::Rpc)?;
+        let rel = r
+            .original
+            .strip_prefix(&variant.path)
+            .map_err(|e| DaemonError::Rpc(e.to_string()))?;
+        let part = cache_plan(Path::new(&variant.path), rel, &r.path).await?;
+        let paths = part
+            .retained
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect::<Vec<_>>();
+        if !paths.is_empty() {
+            r.private_path = Some(r.path.with_extension("private"));
+            save(&r).await?;
+            super::private_store::publish_cache(
+                &r.path,
+                &r.original,
+                &r.path.with_extension("private"),
+                &paths,
+            )
+            .await?;
+        }
+        r.cache_private_ready = Some(true);
+        r.phase = "quarantined".into();
+        save(&r).await?;
+    }
+    Ok(())
+}
 pub(crate) async fn recover(project: &str, variant: &ThreadVariant) -> Result<bool, DaemonError> {
     let active = snapshot::load(project, &variant.slug).await?;
     if Path::new(&variant.path).exists() && active.as_ref().is_some_and(|s| !s.pending) {
@@ -847,8 +1015,10 @@ pub(crate) async fn recover(project: &str, variant: &ThreadVariant) -> Result<bo
                     .patterns
                     .is_some()
             {
-                // Recreate with the newly adopted sparse default. The complete
-                // original remains quarantined until its original grace expires.
+                // Preserve private ignored data before reconstructing the
+                // sparse view; the full original still survives grace.
+                let mut saved = r.clone();
+                ensure_private(&mut saved).await?;
                 return Ok(false);
             }
             fs::rename(&r.path, &r.original).await?;
@@ -861,7 +1031,13 @@ pub(crate) async fn recover(project: &str, variant: &ThreadVariant) -> Result<bo
                 r.snapshot.as_ref().unwrap(),
             )
             .await?;
-            fs::remove_file(&r.metadata).await?;
+            if r.private_path.is_none() {
+                fs::remove_file(&r.metadata).await?;
+            } else {
+                let mut saved = r.clone();
+                saved.phase = "private_preserved".into();
+                save(&saved).await?;
+            }
             return Ok(true);
         }
         // Keep the partial files and their Git registration at a distinct path;
@@ -906,6 +1082,7 @@ pub(crate) async fn allows_duplicate_restore(
                     | "purging"
                     | "recovery_required"
                     | "purged"
+                    | "private_preserved"
             )
         {
             continue;
@@ -959,6 +1136,8 @@ pub(crate) async fn preserve_partial(
             .await?
             .join(format!("{}.quarantine.{id}.json", variant.slug)),
         residue: None,
+        private_path: None,
+        cache_private_ready: Some(false),
     };
     r.residue = Some(r.path.clone());
     validate(&r)?;
@@ -1031,6 +1210,256 @@ mod tests {
                 base_branch: Some("main".into()),
             },
         }
+    }
+    #[tokio::test]
+    async fn selective_reclaim_preserves_private_ignored_data_and_package_edits_outside_git() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        for dirty in [false, true] {
+            let f = fixture();
+            let project = f.project.to_str().unwrap();
+            let path = Path::new(&f.variant.path);
+            std::fs::write(
+                path.join(".gitignore"),
+                ".env\nprivate/\nnode_modules/\nprivate*.txt\n",
+            )
+            .unwrap();
+            git(path, &["add", ".gitignore"]);
+            git(path, &["commit", "-m", "ignore private fixture data"]);
+            std::fs::write(path.join("private1.txt"), "tracked collision").unwrap();
+            git(path, &["add", "-f", "private1.txt"]);
+            git(
+                path,
+                &["commit", "-m", "tracked pathspec collision fixture"],
+            );
+            std::fs::write(path.join("private[1].txt"), "literal private filename").unwrap();
+            std::fs::write(f.project.join(".env"), "project template").unwrap();
+            std::fs::write(path.join(".env"), "PRIVATE_ENV_SENTINEL").unwrap();
+            std::fs::set_permissions(path.join(".env"), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            std::fs::create_dir(path.join("private")).unwrap();
+            std::fs::set_permissions(path.join("private"), std::fs::Permissions::from_mode(0o750))
+                .unwrap();
+            std::fs::write(
+                path.join("private/local.sqlite"),
+                b"SQLite format 3\0PRIVATE_DATABASE_SENTINEL",
+            )
+            .unwrap();
+            let modules = path.join("node_modules");
+            let package = modules.join("example");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(path.join("package.json"), "{}").unwrap();
+            git(path, &["add", "package.json"]);
+            git(path, &["commit", "-m", "package fixture"]);
+            std::fs::write(
+                package.join("package.json"),
+                r#"{"name":"example","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            std::fs::write(package.join("index.js"), "original dependency").unwrap();
+            std::fs::write(package.join("unchanged.js"), "rebuildable dependency").unwrap();
+            super::super::cache_index::test_catalog(&modules, &f._temp.path().join("store"));
+            std::fs::write(package.join("index.js"), "PRIVATE_PACKAGE_EDIT").unwrap();
+            std::fs::write(package.join("notes.txt"), "PRIVATE_ADDED_NOTES").unwrap();
+            if dirty {
+                std::fs::write(path.join("a.txt"), "staged only").unwrap();
+                git(path, &["add", "a.txt"]);
+                std::fs::write(path.join("a.txt"), "working version").unwrap();
+            }
+            let result = if dirty {
+                let assessment = super::super::assess_for_snapshot(project, &f.variant)
+                    .await
+                    .unwrap();
+                let saved = snapshot::create(&f.variant.path, &f.variant.slug)
+                    .await
+                    .unwrap();
+                super::super::finish_snapshot_reclaim(project, &f.variant, assessment, saved).await
+            } else {
+                super::super::reclaim_if_safe(project, &f.variant).await
+            };
+            assert!(matches!(result, Reclaim::Quarantined(_)), "{result:?}");
+            let r = records(project).await.unwrap().remove(0);
+            let saved = r.snapshot.as_ref().unwrap();
+            let tree = git(&f.project, &["ls-tree", "-r", "--name-only", &saved.oid]);
+            assert!(
+                !tree.contains(".env")
+                    && !tree.contains("private/")
+                    && !tree.contains("node_modules")
+            );
+            assert_eq!(
+                purge(&r, r.created_at + GRACE_SECONDS + 1).await.unwrap(),
+                Some(Reclaim::Removed)
+            );
+            assert!(!r.path.exists());
+            let retained = records(project).await.unwrap().remove(0);
+            let vault = retained.private_path.as_ref().unwrap();
+            assert!(!vault.starts_with(f.project.join(".git")));
+            assert_eq!(std::fs::metadata(vault).unwrap().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(vault.join("manifest.json"))
+                    .unwrap()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert!(
+                !vault
+                    .join("files/node_modules/example/unchanged.js")
+                    .exists()
+            );
+            assert!(super::super::restore(project, &f.variant).await.unwrap());
+            assert_eq!(
+                std::fs::read_to_string(path.join("private[1].txt")).unwrap(),
+                "literal private filename"
+            );
+            assert_eq!(
+                std::fs::read_to_string(path.join("private1.txt")).unwrap(),
+                "tracked collision"
+            );
+            assert_eq!(
+                std::fs::read_to_string(path.join(".env")).unwrap(),
+                "PRIVATE_ENV_SENTINEL"
+            );
+            assert_eq!(
+                std::fs::metadata(path.join(".env")).unwrap().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(path.join("private")).unwrap().mode() & 0o777,
+                0o750
+            );
+            assert_eq!(
+                std::fs::read(path.join("private/local.sqlite")).unwrap(),
+                b"SQLite format 3\0PRIVATE_DATABASE_SENTINEL"
+            );
+            assert_eq!(
+                std::fs::read_to_string(package.join("index.js")).unwrap(),
+                "PRIVATE_PACKAGE_EDIT"
+            );
+            assert_eq!(
+                std::fs::read_to_string(package.join("notes.txt")).unwrap(),
+                "PRIVATE_ADDED_NOTES"
+            );
+            assert!(!package.join("unchanged.js").exists());
+            if dirty {
+                assert_eq!(git(path, &["show", ":a.txt"]), "staged only");
+                assert_eq!(
+                    std::fs::read_to_string(path.join("a.txt")).unwrap(),
+                    "working version"
+                );
+            }
+            assert!(
+                purge(&retained, retained.created_at + 100 * GRACE_SECONDS)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn private_preservation_failure_aborts_purge_without_removing_original_data() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        let project = f.project.to_str().unwrap();
+        let path = Path::new(&f.variant.path);
+        std::fs::write(path.join(".gitignore"), ".env\n").unwrap();
+        git(path, &["add", ".gitignore"]);
+        git(path, &["commit", "-m", "ignore fixture"]);
+        std::fs::write(path.join(".env"), "PRIVATE_SENTINEL").unwrap();
+        assert!(matches!(
+            super::super::reclaim_if_safe(project, &f.variant).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = records(project).await.unwrap().remove(0);
+        let vault = r.path.with_extension("private");
+        std::fs::create_dir(&vault).unwrap();
+        std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = purge(&r, r.created_at + GRACE_SECONDS + 1).await;
+        std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+        assert!(r.path.join("a.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(r.path.join(".env")).unwrap(),
+            "PRIVATE_SENTINEL"
+        );
+        assert!(super::super::restore(project, &f.variant).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(path.join(".env")).unwrap(),
+            "PRIVATE_SENTINEL"
+        );
+    }
+    #[tokio::test]
+    async fn selective_cache_cleanup_keeps_edited_and_added_package_files_visible() {
+        let f = fixture();
+        let project = f.project.to_str().unwrap();
+        let path = Path::new(&f.variant.path);
+        std::fs::write(path.join(".gitignore"), "node_modules/\n").unwrap();
+        git(path, &["add", ".gitignore"]);
+        git(path, &["commit", "-m", "ignore fixture"]);
+        std::fs::write(path.join("package.json"), "{}").unwrap();
+        let modules = path.join("node_modules");
+        let p = modules.join("example");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join("package.json"),
+            r#"{"name":"example","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(p.join("index.js"), "original").unwrap();
+        std::fs::write(p.join("unchanged.js"), "regenerable").unwrap();
+        super::super::cache_index::test_catalog(&modules, &f._temp.path().join("store"));
+        std::fs::write(p.join("index.js"), "authored edit").unwrap();
+        std::fs::write(p.join("notes.txt"), "authored addition").unwrap();
+        let r = stage(project, &f.variant, &modules, None).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("index.js")).unwrap(),
+            "authored edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("notes.txt")).unwrap(),
+            "authored addition"
+        );
+        assert!(!p.join("unchanged.js").exists());
+        // A subsequent edit/deletion in the visible partial cache must never
+        // be overwritten by replaying the older quarantined private copy.
+        std::fs::write(p.join("index.js"), "later authored edit").unwrap();
+        std::fs::remove_file(p.join("notes.txt")).unwrap();
+        // The visible root was published durably, but the ready-flag write
+        // could have been interrupted. Resume without replaying the old bytes.
+        let mut interrupted = r.clone();
+        interrupted.cache_private_ready = Some(false);
+        save(&interrupted).await.unwrap();
+        recover_caches(project, &f.variant).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("index.js")).unwrap(),
+            "later authored edit"
+        );
+        assert!(!p.join("notes.txt").exists());
+        // A deployed legacy record has no new ready field. It must not block
+        // opening a checkout that already has reinstalled/edited dependencies.
+        let mut legacy = serde_json::to_value(&r).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_private_ready");
+        fs::write(&r.metadata, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+        let legacy = records(project).await.unwrap().remove(0);
+        assert_eq!(legacy.cache_private_ready, None);
+        recover_caches(project, &f.variant).await.unwrap();
+        assert!(!super::super::restore(project, &f.variant).await.unwrap());
+        assert_eq!(
+            purge(&legacy, r.created_at + GRACE_SECONDS + 1)
+                .await
+                .unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("index.js")).unwrap(),
+            "later authored edit"
+        );
+        assert!(!p.join("notes.txt").exists());
+        assert!(records(project).await.unwrap()[0].private_path.is_some());
     }
     #[tokio::test]
     async fn staged_and_working_versions_are_reachable_and_restore_independently() {
@@ -1160,6 +1589,324 @@ mod tests {
             std::fs::read_to_string(path.join("a.txt")).unwrap(),
             "baseline"
         );
+    }
+    #[tokio::test]
+    async fn private_rust_cache_can_finish_after_its_manifest_or_checkout_disappears() {
+        use std::os::unix::fs::PermissionsExt;
+        for remove_checkout in [false, true] {
+            let f = fixture();
+            let path = Path::new(&f.variant.path);
+            std::fs::write(
+                path.join("Cargo.toml"),
+                "[package]\nname='fixture'\nversion='1.0.0'\n",
+            )
+            .unwrap();
+            let target = path.join("target");
+            std::fs::create_dir_all(target.join("debug")).unwrap();
+            std::fs::write(
+                target.join("CACHEDIR.TAG"),
+                "Signature: 8a477f597d28d172789f06886806bc55",
+            )
+            .unwrap();
+            std::fs::write(
+                target.join(".rustc_info.json"),
+                r#"{"rustc_fingerprint":1}"#,
+            )
+            .unwrap();
+            std::fs::write(target.join("debug/example.rlib"), b"!<arch>\nfixture").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+            let r = stage(f.project.to_str().unwrap(), &f.variant, &target, None)
+                .await
+                .unwrap();
+            if remove_checkout {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path.join("Cargo.toml")).unwrap();
+            }
+            assert!(matches!(
+                purge(&r, r.created_at + GRACE_SECONDS + 1).await.unwrap(),
+                Some(Reclaim::Removed)
+            ));
+            assert!(!r.path.exists());
+            let vault = records(f.project.to_str().unwrap())
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|v| v.metadata == r.metadata)
+                .unwrap()
+                .private_path
+                .unwrap();
+            assert_eq!(
+                std::fs::read(vault.join("files/debug/example.rlib")).unwrap(),
+                b"!<arch>\nfixture"
+            );
+            assert_eq!(
+                std::fs::metadata(vault.join("files"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o750
+            );
+        }
+    }
+    #[tokio::test]
+    async fn private_snapshot_verification_does_not_write_unexpected_files_to_git() {
+        let f = fixture();
+        let path = Path::new(&f.variant.path);
+        let saved = snapshot::create(&f.variant.path, &f.variant.slug)
+            .await
+            .unwrap();
+        std::fs::write(path.join(".env"), "PRIVATE_UNEXPECTED_FIXTURE").unwrap();
+        let oid = git(path, &["hash-object", "--no-filters", "--", ".env"]);
+        let exists = || {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(["cat-file", "-e", &oid])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(!exists());
+        assert!(snapshot::verify(&f.variant.path, &saved).await.is_err());
+        assert!(
+            !exists(),
+            "Verification must not store newly appeared private data in Git"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join(".env")).unwrap(),
+            "PRIVATE_UNEXPECTED_FIXTURE"
+        );
+    }
+    #[tokio::test]
+    async fn private_snapshot_rejects_untracked_nested_gitlinks_without_removing_work() {
+        let f = fixture();
+        let path = Path::new(&f.variant.path);
+        let nested = path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        git(&nested, &["init", "-b", "main"]);
+        git(&nested, &["config", "user.name", "Fixture"]);
+        git(
+            &nested,
+            &["config", "user.email", "fixture@example.invalid"],
+        );
+        std::fs::write(nested.join("work.txt"), "committed nested work").unwrap();
+        git(&nested, &["add", "."]);
+        git(&nested, &["commit", "-m", "nested fixture"]);
+        std::fs::write(nested.join("work.txt"), "uncommitted nested work").unwrap();
+        std::fs::write(nested.join("notes.txt"), "untracked nested notes").unwrap();
+        let head = git(path, &["rev-parse", "HEAD"]);
+        let result = snapshot::create(&f.variant.path, &f.variant.slug).await;
+        assert!(
+            result.is_err(),
+            "A Gitlink cannot preserve nested uncommitted/untracked data"
+        );
+        assert_eq!(git(path, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            std::fs::read_to_string(nested.join("work.txt")).unwrap(),
+            "uncommitted nested work"
+        );
+        assert_eq!(
+            std::fs::read_to_string(nested.join("notes.txt")).unwrap(),
+            "untracked nested notes"
+        );
+        assert!(
+            records(f.project.to_str().unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[tokio::test]
+    async fn private_restore_reinstates_self_ignored_rules_before_privacy_validation() {
+        let f = fixture();
+        let path = Path::new(&f.variant.path);
+        let project = f.project.to_str().unwrap();
+        std::fs::create_dir(path.join("private")).unwrap();
+        std::fs::write(path.join("private/.gitignore"), "*\n").unwrap();
+        std::fs::write(path.join("private/secret.txt"), "PRIVATE_FIXTURE").unwrap();
+        assert!(git(path, &["status", "--porcelain=v1", "--untracked-files=all"]).is_empty());
+        assert!(matches!(
+            super::super::reclaim_if_safe(project, &f.variant).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = records(project).await.unwrap().remove(0);
+        assert_eq!(
+            purge(&r, r.created_at + GRACE_SECONDS + 1).await.unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(super::super::restore(project, &f.variant).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(path.join("private/secret.txt")).unwrap(),
+            "PRIVATE_FIXTURE"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("private/.gitignore")).unwrap(),
+            "*\n"
+        );
+        assert!(git(path, &["status", "--porcelain=v1", "--untracked-files=all"]).is_empty());
+        let saved = snapshot::load(project, &f.variant.slug)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !git(&f.project, &["ls-tree", "-r", "--name-only", &saved.oid]).contains("private/")
+        );
+    }
+    #[tokio::test]
+    async fn private_sparse_restore_keeps_original_tracked_ancestor_ignore_rules() {
+        let f = fixture();
+        let path = Path::new(&f.variant.path);
+        let project = f.project.to_str().unwrap();
+        std::fs::create_dir(path.join("data")).unwrap();
+        std::fs::write(path.join("data/.gitignore"), "secret.txt\n").unwrap();
+        git(path, &["add", "data/.gitignore"]);
+        git(path, &["commit", "-m", "nested ignore fixture"]);
+        std::fs::write(path.join("data/secret.txt"), "PRIVATE_FIXTURE").unwrap();
+        let config = f._temp.path().join("setup.json");
+        std::fs::write(&config, r#"{"sparse_exclude":["data"]}"#).unwrap();
+        git(
+            &f.project,
+            &[
+                "config",
+                "falcondeck.worktreeSetup",
+                config.to_str().unwrap(),
+            ],
+        );
+        assert!(matches!(
+            super::super::reclaim_if_safe(project, &f.variant).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = records(project).await.unwrap().remove(0);
+        assert_eq!(
+            purge(&r, r.created_at + GRACE_SECONDS + 1).await.unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(super::super::restore(project, &f.variant).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(path.join("data/secret.txt")).unwrap(),
+            "PRIVATE_FIXTURE"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("data/.gitignore")).unwrap(),
+            "secret.txt\n"
+        );
+        assert!(git(path, &["status", "--porcelain=v1", "--untracked-files=all"]).is_empty());
+    }
+    #[tokio::test]
+    async fn private_restore_refuses_changed_ignore_rules_without_exposing_private_data() {
+        let f = fixture();
+        let path = Path::new(&f.variant.path);
+        let project = f.project.to_str().unwrap();
+        std::fs::write(path.join(".gitignore"), "secret.txt\n").unwrap();
+        git(path, &["add", ".gitignore"]);
+        git(path, &["commit", "-m", "ignore private fixture"]);
+        std::fs::write(path.join("secret.txt"), "PRIVATE_FIXTURE").unwrap();
+        assert!(matches!(
+            super::super::reclaim_if_safe(project, &f.variant).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = records(project).await.unwrap().remove(0);
+        assert_eq!(
+            purge(&r, r.created_at + GRACE_SECONDS + 1).await.unwrap(),
+            Some(Reclaim::Removed)
+        );
+        let stage = f._temp.path().join("changed-ignore-stage");
+        git(
+            &f.project,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "changed-ignore",
+                stage.to_str().unwrap(),
+                &f.variant.branch,
+            ],
+        );
+        std::fs::write(stage.join(".gitignore"), "").unwrap();
+        assert!(
+            super::super::private_store::restore(project, &f.variant.slug, &stage)
+                .await
+                .is_err()
+        );
+        // This private unpublished stage may contain the copied file, but it
+        // must never be admitted or snapshotted after privacy validation fails.
+        assert!(git(&stage, &["ls-files", "--", "secret.txt"]).is_empty());
+        let vault = records(project)
+            .await
+            .unwrap()
+            .remove(0)
+            .private_path
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(vault.join("files/secret.txt")).unwrap(),
+            "PRIVATE_FIXTURE"
+        );
+        assert!(super::super::restore(project, &f.variant).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(path.join("secret.txt")).unwrap(),
+            "PRIVATE_FIXTURE"
+        );
+    }
+    #[tokio::test]
+    async fn private_cache_named_files_and_links_survive_sparse_restore_and_purge() {
+        use std::os::unix::fs::symlink;
+        for purge_first in [false, true] {
+            let f = fixture();
+            let path = Path::new(&f.variant.path);
+            let project = f.project.to_str().unwrap();
+            std::fs::write(path.join(".gitignore"), "node_modules\ntarget\n").unwrap();
+            std::fs::create_dir(path.join("data")).unwrap();
+            std::fs::write(path.join("data/payload"), "tracked sparse fixture").unwrap();
+            git(path, &["add", ".gitignore", "data"]);
+            git(
+                path,
+                &["commit", "-m", "ignore non-directory fixture roots"],
+            );
+            let external = f._temp.path().join("external");
+            std::fs::create_dir(&external).unwrap();
+            std::fs::write(external.join("sentinel"), "external data").unwrap();
+            symlink(&external, path.join("node_modules")).unwrap();
+            std::fs::write(path.join("target"), "private ordinary file").unwrap();
+            let config = f._temp.path().join("setup.json");
+            std::fs::write(&config, r#"{"sparse_exclude":["data"]}"#).unwrap();
+            git(
+                &f.project,
+                &[
+                    "config",
+                    "falcondeck.worktreeSetup",
+                    config.to_str().unwrap(),
+                ],
+            );
+            assert!(matches!(
+                super::super::reclaim_if_safe(project, &f.variant).await,
+                Reclaim::Quarantined(_)
+            ));
+            let r = records(project).await.unwrap().remove(0);
+            if purge_first {
+                assert_eq!(
+                    purge(&r, r.created_at + GRACE_SECONDS + 1).await.unwrap(),
+                    Some(Reclaim::Removed)
+                );
+            }
+            assert!(super::super::restore(project, &f.variant).await.unwrap());
+            assert_eq!(
+                std::fs::read_link(path.join("node_modules")).unwrap(),
+                external
+            );
+            assert_eq!(
+                std::fs::read_to_string(path.join("target")).unwrap(),
+                "private ordinary file"
+            );
+            assert_eq!(
+                std::fs::read_to_string(external.join("sentinel")).unwrap(),
+                "external data"
+            );
+            assert!(!path.join("data").exists());
+            assert!(git(path, &["status", "--porcelain=v1", "--untracked-files=all"]).is_empty());
+        }
     }
     #[tokio::test]
     async fn clean_legacy_sparse_restore_can_be_used_again_while_quarantine_waits() {
@@ -1542,7 +2289,15 @@ mod tests {
             .replace("@RELATIVE@", "../example/cli.js")
             .replace("@NODE_PATH@", modules.to_str().unwrap());
         std::fs::write(modules.join(".bin/example"), shim).unwrap();
-        assert!(super::super::cache::validate(path, "node_modules").is_ok());
+        super::super::cache_index::test_catalog(&modules, &f._temp.path().join("store"));
+        let proof = super::super::cache::partition(path, "node_modules", &modules).unwrap();
+        assert!(proof.rebuildable_bytes > 0);
+        assert!(
+            proof
+                .retained
+                .iter()
+                .any(|(p, _)| p == Path::new(".bin/example"))
+        );
         assert!(matches!(
             super::super::reclaim_if_safe(project, &f.variant).await,
             Reclaim::Quarantined(_)

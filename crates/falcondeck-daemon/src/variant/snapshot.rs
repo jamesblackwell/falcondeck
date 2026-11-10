@@ -74,6 +74,7 @@ async fn command(path: &str, args: &[&str], index: Option<&Path>) -> Result<Stri
 }
 async fn capture_tree(
     path: &str,
+    expected: Option<&[String]>,
 ) -> Result<(String, Vec<String>, String, Vec<String>), DaemonError> {
     let tracked = command(path, &["ls-files", "--stage", "-z"], None).await?;
     if tracked.split('\0').any(|s| s.starts_with("160000 ")) {
@@ -124,6 +125,18 @@ async fn capture_tree(
             None,
         )
         .await?;
+        // Verification must not store newly appeared (possibly private) files
+        // in Git merely to discover that the snapshot no longer matches.
+        if expected.is_some_and(|known| {
+            others
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .any(|name| !known.iter().any(|p| p == name))
+        }) {
+            return Err(DaemonError::Rpc(
+                "Snapshot verification found new untracked files; checkout retained".into(),
+            ));
+        }
         paths.extend(
             others
                 .split('\0')
@@ -186,6 +199,14 @@ async fn capture_tree(
         // Git clean filters and line-ending conversion can be lossy. Refuse
         // reclamation unless regular-file blobs contain the exact disk bytes.
         let stages = command(path, &["ls-files", "--stage", "-z"], Some(&index)).await?;
+        // `git add` can discover an untracked nested repository after the
+        // initial index check. Its Gitlink cannot preserve its local index,
+        // uncommitted files or Git directory, so never reclaim from that tree.
+        if stages.split('\0').any(|entry| entry.starts_with("160000 ")) {
+            return Err(DaemonError::Rpc(
+                "Nested repositories require manual preservation before reclamation".into(),
+            ));
+        }
         let blobs = stages
             .split('\0')
             .filter_map(|entry| {
@@ -233,7 +254,7 @@ pub(crate) async fn create(path: &str, slug: &str) -> Result<Snapshot, DaemonErr
         .await?
         .trim()
         .to_string();
-    let (tree, materialized, index_tree, skip_worktree) = capture_tree(path).await?;
+    let (tree, materialized, index_tree, skip_worktree) = capture_tree(path, None).await?;
     // A separate parent makes staged-only blobs reachable even when the working
     // copy has a different version. Neither original branch nor index is changed.
     let index_commit = command(
@@ -369,7 +390,7 @@ async fn verify_contents(path: &str, snapshot: &Snapshot) -> Result<(), DaemonEr
             "Snapshot index component is missing or inconsistent".into(),
         ));
     }
-    let (tree, files, index_tree, _) = capture_tree(path).await?;
+    let (tree, files, index_tree, _) = capture_tree(path, Some(&snapshot.materialized)).await?;
     if tree != snapshot.tree
         || (!snapshot.clean && files != snapshot.materialized)
         || (!snapshot.index_tree.is_empty() && index_tree != snapshot.index_tree)

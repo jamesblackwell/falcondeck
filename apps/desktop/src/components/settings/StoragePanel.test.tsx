@@ -56,7 +56,7 @@ describe('Storage settings', () => {
     render(<StoragePanel baseUrl="http://daemon" />); await screen.findByText('Clean task');
     expect(screen.queryByRole('switch',{name:/Delete artifacts/})).not.toBeInTheDocument();
     expect(screen.queryByRole('switch',{name:/Delete experiments/})).not.toBeInTheDocument();
-    expect(screen.getByText(/never automatically deleted/)).toBeInTheDocument();
+    expect(screen.getByText('Candidates for manual review only. Artifacts and experiments are never automatically deleted.')).toBeInTheDocument();
   });
   it('confirms the one-click eligible snapshot action with count and size', async()=>{
     render(<StoragePanel baseUrl="http://daemon" />);await screen.findByText('Clean task');
@@ -86,6 +86,12 @@ describe('Storage settings', () => {
     expect(api.snapshots.mock.calls.map(c=>c[0].length)).toEqual([100,1]);
     expect(screen.getByText('First 100 quarantined')).toBeInTheDocument();
     expect(await screen.findByRole('alert')).toHaveTextContent('Last batch failed');
+  });
+  it('shows private retained files without promising a purge deadline', async () => {
+    api.report.mockResolvedValue({...report,quarantines:[{project:'/project',original:'/variants/old',path:'/variants/old.private',bytes:4096,release_after:1,phase:'private_preserved'}]});
+    render(<StoragePanel baseUrl="http://daemon" />);
+    expect(await screen.findByText('Private files kept for restore · /variants/old.private')).toBeInTheDocument();
+    expect(screen.queryByText(/earliest purge/)).not.toBeInTheDocument();
   });
   it('shows inventory failures without enabling deletion', async () => {
     api.report.mockRejectedValue(new Error('Cannot inspect checkout'));

@@ -1,6 +1,6 @@
 //! Safe lifecycle reclamation: local branch and index checkpoints survive, and
 //! checkout removal follows a verified, recoverable quarantine. Ignored data
-//! must pass the same positive cache proof as cache-only cleanup.
+//! is privately preserved unless it passes the shared positive cache proof.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -151,6 +151,7 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
     if let (Ok(actual),Ok(main))=(fs::canonicalize(&variant.path).await,fs::canonicalize(project_path).await){
         if actual==main{return Err("Main checkouts are protected".into())}
     }
+    super::quarantine::recover_caches(project_path,variant).await.map_err(|e|e.to_string())?;
     if super::quarantine::recover(project_path,variant).await.map_err(|e|e.to_string())? {return Ok(true)}
     if Path::new(&variant.path).exists() {
         if let Some(saved)=super::snapshot::load(project_path,&variant.slug).await.map_err(|e|e.to_string())?.filter(|s|s.pending) {
@@ -242,7 +243,12 @@ pub(super) async fn status_blockers_mode(
 ) -> Result<Vec<String>, String> {
     status_blockers_mode_at(project_path,path,path,allow_dirty).await
 }
-pub(super) async fn status_blockers_mode_at(project_path: &str, path: &str, logical: &str, allow_dirty: bool) -> Result<Vec<String>, String> {
+pub(super) async fn status_blockers_mode_at(
+    _project_path: &str,
+    path: &str,
+    _logical: &str,
+    allow_dirty: bool,
+) -> Result<Vec<String>, String> {
     let out = git(
         path,
         &[
@@ -262,9 +268,7 @@ pub(super) async fn status_blockers_mode_at(project_path: &str, path: &str, logi
     for (code, entry) in parse_status(&out) {
         match code.as_str() {
             "!!" => {
-                if !ignored_safe_at(project_path, path, logical, &entry).await {
-                    other_ignored.push(entry);
-                }
+                other_ignored.push(entry);
             }
             "??" => untracked += 1,
             _ => tracked += 1,
@@ -276,15 +280,8 @@ pub(super) async fn status_blockers_mode_at(project_path: &str, path: &str, logi
     if untracked > 0 && !allow_dirty {
         reasons.push(format!("{untracked} untracked file(s)"));
     }
-    if let Some(first) = other_ignored.first() {
-        reasons.push(format!(
-            "non-rebuildable ignored files: {first}{}",
-            if other_ignored.len() > 1 {
-                format!(" +{}", other_ignored.len() - 1)
-            } else {
-                String::new()
-            }
-        ));
+    if other_ignored.iter().any(|p|!super::private_store::relative(Path::new(p.trim_end_matches('/')))) {
+        reasons.push("Ignored data has unsupported recovery paths; checkout retained".into());
     }
     Ok(reasons)
 }
@@ -358,40 +355,7 @@ pub(crate) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, Str
     Ok(reasons)
 }
 
-async fn ignored_safe_at(project: &str, path: &str, logical: &str, entry: &str) -> bool {
-    let mut pending = vec![entry.to_string()];
-    while let Some(relative) = pending.pop() {
-        if super::cache::roots_covering(&relative).any(|root| super::cache::validate_locations(Path::new(path),Path::new(logical),root,&Path::new(path).join(root)).is_ok()) || identical_to_project(project, path, &relative).await {
-            continue;
-        }
-        // Git can collapse storage/framework to one ignored entry. Inspect
-        // only ancestors of allowlisted caches; sessions and logs still block.
-        let prefix = format!("{}/", relative.trim_end_matches('/'));
-        if !super::cache::ancestor_of_cache(&relative)
-        {
-            return false;
-        }
-        let Ok(mut dir) = fs::read_dir(Path::new(path).join(&relative)).await else {
-            return false;
-        };
-        loop {
-            match dir.next_entry().await {
-                Ok(Some(child)) => {
-                    let Ok(kind) = child.file_type().await else {
-                        return false;
-                    };
-                    if kind.is_symlink() {
-                        return false;
-                    }
-                    pending.push(format!("{prefix}{}", child.file_name().to_string_lossy()));
-                }
-                Ok(None) => break,
-                Err(_) => return false,
-            }
-        }
-    }
-    true
-}
+
 
 /// `(XY, path)` pairs from `status --porcelain=v1 -z`; a rename or copy
 /// entry carries its source path as a following field, which is skipped.
@@ -570,7 +534,7 @@ where
 
 /// An untracked allowlisted file passes only when byte-identical to the
 /// project folder's copy; anything else may be work.
-async fn identical_to_project(project_path: &str, path: &str, relative: &str) -> bool {
+pub(crate) async fn identical_to_project(project_path: &str, path: &str, relative: &str) -> bool {
     let name = relative.rsplit('/').next().unwrap_or("");
     if relative.ends_with('/') || !matches_allowlist(name) {
         return false;
@@ -929,7 +893,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dirty_untracked_and_unknown_ignored_files_keep_the_worktree() {
+    async fn dirty_and_untracked_stay_while_ignored_configuration_is_preserved() {
         let f = Fixture::new();
         let dirty = f.variant("dirty");
         std::fs::write(Path::new(&dirty.path).join("a.txt"), "changed\n").unwrap();
@@ -939,7 +903,7 @@ mod tests {
         std::fs::create_dir(Path::new(&ignored.path).join(".idea")).unwrap();
         std::fs::write(Path::new(&ignored.path).join(".idea/w.xml"), "x").unwrap();
 
-        for v in [&dirty, &untracked, &ignored] {
+        for v in [&dirty, &untracked] {
             assert!(
                 matches!(reclaim_if_safe(f.project_str(), v).await, Reclaim::Kept(_)),
                 "{} should be kept",
@@ -947,18 +911,60 @@ mod tests {
             );
             assert!(Path::new(&v.path).exists());
         }
+        assert!(matches!(
+            reclaim_if_safe(f.project_str(), &ignored).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = super::super::quarantine::records(f.project_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.variant == ignored)
+            .unwrap();
+        assert_eq!(
+            super::super::quarantine::purge(
+                &r,
+                r.created_at + super::super::quarantine::GRACE_SECONDS + 1
+            )
+            .await
+            .unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(restore(f.project_str(), &ignored).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&ignored.path).join(".idea/w.xml")).unwrap(),
+            "x"
+        );
     }
 
     #[tokio::test]
-    async fn copied_env_files_do_not_block() {
+    async fn differing_env_files_are_kept_privately_and_restored() {
         let f = Fixture::new();
         std::fs::write(f.project.join(".env"), "KEY=1\n").unwrap();
         let v = f.variant("env");
         std::fs::write(Path::new(&v.path).join(".env"), "KEY=2\n").unwrap();
         assert!(matches!(
             reclaim_if_safe(f.project_str(), &v).await,
-            Reclaim::Kept(_)
+            Reclaim::Quarantined(_)
         ));
+        let r = super::super::quarantine::records(f.project_str())
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            super::super::quarantine::purge(
+                &r,
+                r.created_at + super::super::quarantine::GRACE_SECONDS + 1
+            )
+            .await
+            .unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(restore(f.project_str(), &v).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&v.path).join(".env")).unwrap(),
+            "KEY=2\n"
+        );
     }
 
     #[tokio::test]
@@ -1120,11 +1126,34 @@ mod tests {
 
     #[tokio::test]
     async fn collapsed_framework_directory_does_not_authorize_ignored_data_deletion() {
-        let f=Fixture::new();let v=f.variant("framework");
-        let path=Path::new(&v.path).join("storage/framework/cache");std::fs::create_dir_all(&path).unwrap();std::fs::write(path.join("authored.php"),"unique").unwrap();
-        std::fs::write(f.project.join(".git/info/exclude"),"storage/\n").unwrap();
-        assert!(matches!(reclaim_if_safe(f.project_str(),&v).await,Reclaim::Kept(_)));
-        assert!(path.join("authored.php").exists());
+        let f = Fixture::new();
+        let v = f.variant("framework");
+        let path = Path::new(&v.path).join("storage/framework/cache");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("authored.php"), "unique").unwrap();
+        std::fs::write(f.project.join(".git/info/exclude"), "storage/\n").unwrap();
+        assert!(matches!(
+            reclaim_if_safe(f.project_str(), &v).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = super::super::quarantine::records(f.project_str())
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            super::super::quarantine::purge(
+                &r,
+                r.created_at + super::super::quarantine::GRACE_SECONDS + 1
+            )
+            .await
+            .unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(restore(f.project_str(), &v).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(path.join("authored.php")).unwrap(),
+            "unique"
+        );
     }
 
     #[tokio::test]
