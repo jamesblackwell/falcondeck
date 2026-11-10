@@ -224,10 +224,19 @@ async fn terminal_http_and_websocket_round_trip() {
         .headers_mut()
         .insert("Origin", "http://localhost:1420".parse().unwrap());
     let (mut socket, _response) = tokio_tungstenite::connect_async(request).await.unwrap();
-    assert!(matches!(
-        next_protocol_frame(&mut socket).await,
-        TerminalServerFrame::TerminalAttached { .. }
-    ));
+    // Status metadata is polled independently of the attachment channel and
+    // may arrive first. Still require the acknowledgement before any output.
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            match next_protocol_frame(&mut socket).await {
+                TerminalServerFrame::TerminalStatus { .. } => {}
+                TerminalServerFrame::TerminalAttached { .. } => break,
+                other => panic!("expected terminal attachment, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("terminal attachment acknowledgement");
 
     socket
         .send(Message::Text(

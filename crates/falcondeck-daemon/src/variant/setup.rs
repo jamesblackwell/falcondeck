@@ -147,14 +147,28 @@ pub(super) async fn restore_setup(project: &str, slug: &str) -> Result<Setup, Da
             Ok(setup)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Legacy variants predate sparse provisioning. Missing metadata is
-            // not permission to change their originally full checkout.
-            let mut setup = load(project).await?;
-            setup.sparse_exclude.clear();
-            Ok(setup)
+            // Legacy reclaimed clean variants adopt today's project default.
+            load(project).await
         }
         Err(e) => Err(DaemonError::Rpc(e.to_string())),
     }
+}
+
+/// Capture legacy clean variants' future sparse default without modifying their
+/// live checkout. Existing recipes and dirty snapshots retain their exact setup.
+pub(super) async fn preserve_for_reclaim(project:&str,slug:&str,destination:&Path,clean:bool)->Result<(),DaemonError>{
+    let path=recipe_path(project,slug).await?;
+    if clean && !path.exists() {
+        let setup=load(project).await?;
+        let patterns=(!setup.sparse_exclude.is_empty()).then(||exclusion_patterns(&setup.sparse_exclude));
+        fs::create_dir_all(path.parent().unwrap()).await?;
+        let temp=path.with_extension(format!("{}.tmp",uuid::Uuid::new_v4()));
+        fs::write(&temp,serde_json::to_vec(&Recipe{setup,patterns})?).await?;
+        fs::rename(temp,path).await?;return Ok(())
+    }
+    let mut setup=restore_setup(project,slug).await?;
+    if !clean && !path.exists(){setup.sparse_exclude.clear();setup.patterns=None;}
+    save_setup(project,slug,destination,setup).await
 }
 
 pub(super) async fn save_setup(
@@ -976,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_full_checkout_does_not_inherit_new_sparse_defaults_on_restore() {
+    async fn legacy_full_checkout_adopts_project_sparse_default_on_restore() {
         let root = tempdir().unwrap();
         let project = root.path().join("project");
         fs::create_dir(&project).await.unwrap();
@@ -1003,7 +1017,8 @@ mod tests {
             base_branch: Some("main".into()),
         };
         restore(project.to_str().unwrap(), &v).await.unwrap();
-        assert!(dest.join("data/qbank/file").exists());
+        assert!(!dest.join("data/qbank/file").exists());
+        assert!(hint(project.to_str().unwrap(), &v.path).await.unwrap().contains("sparse-checkout add"));
         let _ = crate::variant::wait_dependencies(&v.path).await;
     }
     #[tokio::test]

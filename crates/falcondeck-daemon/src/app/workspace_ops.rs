@@ -1606,9 +1606,10 @@ pub(super) async fn archive_thread(
 fn spawn_variant_reclaim(app: &AppState, workspace_id: &str, thread_ids: Vec<String>) {
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
-    tokio::spawn(async move {
+    let worker = app.clone();
+    app.spawn_background_task(async move {
         for thread_id in thread_ids {
-            reclaim_archived_variant(&app, &workspace_id, &thread_id).await;
+            reclaim_archived_variant(&worker, &workspace_id, &thread_id).await;
         }
     });
 }
@@ -1644,36 +1645,63 @@ pub(super) async fn reclaim_archived_variant(
     // Archive may race background dependency provisioning. Wait outside the
     // gate, then re-check archive/activity before any removal.
     let _ = crate::variant::wait_dependencies(&variant.path).await;
-    let assessment = crate::variant::assess(&workspace_path, &variant).await;
-    let gate = app.variant_gate(workspace_id, thread_id).await;
-    let _guard = gate.lock().await;
+    if Utc::now().signed_duration_since(activity).num_seconds() <= 86400
+        || !app.storage_archive_allowed(&workspace_path, &variant).await
     {
-        let ws = app.inner.workspaces.lock().await;
-        let t = ws.get(workspace_id)?.threads.get(thread_id)?;
-        if !t.summary.is_archived || t.summary.updated_at != activity
-            || t.summary.variant.as_ref() != Some(&variant)
-            || matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
-            || !t.queued_requests.is_empty() || !t.summary.queued_turns.is_empty() || t.dispatching_request.is_some() { return None; }
+        return None;
     }
-    let outcome = match assessment {
-        Ok(ticket) => crate::variant::finish_reclaim(&workspace_path, &variant, ticket).await,
-        Err(result) => result,
+    let _storage_guard = app.inner.storage_gate.lock().await;
+    let mut run = falcondeck_core::storage::StorageRun {
+        id: Uuid::new_v4().to_string(),
+        started_at: Utc::now().timestamp(),
+        ..Default::default()
     };
-    match &outcome {
-        crate::variant::Reclaim::Removed => {
-            tracing::info!(thread_id, path = %variant.path, "reclaimed isolated copy of archived thread");
-        }
-        crate::variant::Reclaim::Kept(reasons) => {
-            tracing::info!(
-                thread_id,
-                path = %variant.path,
-                branch = %variant.branch,
-                reasons = %reasons.join("; "),
-                "kept isolated copy of archived thread"
-            );
-        }
+    if app.save_storage_run(&run).await.is_err() {
+        return None;
     }
-    Some(outcome)
+    let result = async {
+        let assessment = crate::variant::assess(&workspace_path, &variant).await;
+        let gate = app.variant_gate(workspace_id, thread_id).await;
+        let _guard = gate.lock().await;
+        {
+            let ws = app.inner.workspaces.lock().await;
+            let t = ws.get(workspace_id)?.threads.get(thread_id)?;
+            if !t.summary.is_archived
+                || t.summary.updated_at != activity
+                || t.summary.variant.as_ref() != Some(&variant)
+                || matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
+                || !t.queued_requests.is_empty()
+                || !t.summary.queued_turns.is_empty()
+                || t.dispatching_request.is_some()
+            {
+                return None;
+            }
+        }
+        if !app.storage_archive_allowed(&workspace_path, &variant).await {
+            return None;
+        }
+        let outcome = match assessment {
+            Ok(ticket) => crate::variant::finish_reclaim(&workspace_path, &variant, ticket).await,
+            Err(result) => result,
+        };
+        match &outcome {
+            crate::variant::Reclaim::Removed | crate::variant::Reclaim::Quarantined(_) => {
+                tracing::info!(thread_id, path = %variant.path, "reclaimed isolated copy of archived thread");
+            }
+            crate::variant::Reclaim::Kept(reasons) | crate::variant::Reclaim::RecoveryRequired(reasons) => {
+                tracing::info!(thread_id, path = %variant.path, branch = %variant.branch,
+                    reasons = %reasons.join("; "), "kept isolated copy of archived thread");
+            }
+        }
+        Some(outcome)
+    }.await;
+    run.entries
+        .push(format!("Archive {workspace_id}/{thread_id}: {result:?}"));
+    run.finished_at = Some(Utc::now().timestamp());
+    if let Err(e) = app.save_storage_run(&run).await {
+        tracing::warn!(%e,"failed to finish archive cleanup log");
+    }
+    result
 }
 
 pub(super) async fn archive_all_threads(
@@ -9516,9 +9544,9 @@ mod tests {
         completed.send(Some(Vec::new())).unwrap();
         assert_eq!(
             archived.await.unwrap(),
-            Some(crate::variant::Reclaim::Removed)
+            None
         );
-        assert!(!std::path::Path::new(&f.variant.path).exists());
+        assert!(std::path::Path::new(&f.variant.path).exists());
     }
 
     #[tokio::test]
@@ -9591,7 +9619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn variant_delete_gates_cleanup_without_waiting_for_the_remote_in_the_rpc() {
+    async fn variant_delete_preserves_local_branch_without_remote_verification() {
         let f = VariantFixture::new().await;
         let helper = f.root.path().join("slow-ssh.sh");
         std::fs::write(&helper, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
@@ -9624,8 +9652,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            std::path::Path::new(&f.variant.path).exists(),
-            "unverified remote must keep checkout after thread deletion"
+            !std::path::Path::new(&f.variant.path).exists(),
+            "The preserved local branch permits quarantining an unpublished clean checkout"
         );
     }
 
@@ -9669,4 +9697,618 @@ mod tests {
         }
     }
 
+    fn age_storage_tree(path: &std::path::Path) {
+        if path.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                age_storage_tree(&entry.unwrap().path());
+            }
+        }
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 86400))
+            .unwrap();
+    }
+    async fn storage_fixture() -> VariantFixture {
+        let f = VariantFixture::new().await;
+        std::fs::write(
+            f.project.join(".git/info/exclude"),
+            "node_modules/\ntarget/\n",
+        )
+        .unwrap();
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join("package.json"), "{}").unwrap();
+        VariantFixture::git_at(path, &["add", "package.json"]);
+        VariantFixture::git_at(path, &["commit", "-m", "package manifest"]);
+        std::fs::create_dir_all(path.join("node_modules/example")).unwrap();
+        std::fs::write(
+            path.join("node_modules/.package-lock.json"),
+            r#"{"packages":{"node_modules/example":{}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("node_modules/example/package.json"),
+            r#"{"name":"example"}"#,
+        )
+        .unwrap();
+        std::fs::write(path.join("node_modules/example/cache.js"), "cache").unwrap();
+        std::fs::write(
+            path.join("node_modules/example/unchanged.js"),
+            "cache payload",
+        )
+        .unwrap();
+        crate::variant::cache_index::test_catalog(
+            &path.join("node_modules"),
+            &f.root.path().join("store"),
+        );
+        age_storage_tree(std::path::Path::new(&f.variant.path));
+        age_storage_tree(&f.project.join(".git"));
+        f.app
+            .with_managed_thread_mut("workspace-1", "thread-1", |t| {
+                t.summary.updated_at = Utc::now() - chrono::Duration::days(20)
+            })
+            .await
+            .unwrap();
+        f
+    }
+    #[tokio::test]
+    async fn storage_quarantine_survives_workspace_deletion_and_remains_purgeable() {
+        let f = storage_fixture().await;
+        let project = f.project.to_str().unwrap();
+        let result = crate::variant::reclaim_if_safe(project, &f.variant).await;
+        assert!(matches!(result, crate::variant::Reclaim::Quarantined(_)), "{result:?}");
+        f.app.inner.workspaces.lock().await.clear();
+        let report = f.app.storage_report().await.unwrap();
+        assert_eq!(report.quarantines.len(), 1);
+        let r = crate::variant::quarantine::records(project).await.unwrap().remove(0);
+        let mut receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(&r.metadata).unwrap()).unwrap();
+        receipt["created_at"] = (Utc::now().timestamp() - 3 * 86400).into();
+        std::fs::write(&r.metadata, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        age_storage_tree(&r.path);
+        age_storage_tree(&f.project.join(".git"));
+        let run = f.app.storage_cleanup(true).await.unwrap();
+        assert!(!r.path.exists(), "{:?}", run.entries);
+    }
+    #[tokio::test]
+    async fn storage_policy_protects_dirty_running_queued_and_recent_variants() {
+        for reason in [
+            "dirty",
+            "untracked",
+            "running",
+            "queued",
+            "recent_source",
+            "recent_thread",
+        ] {
+            let f = storage_fixture().await;
+            let path = std::path::Path::new(&f.variant.path);
+            match reason {
+                "dirty" => std::fs::write(path.join("a.txt"), "edited").unwrap(),
+                "untracked" => std::fs::write(path.join("authored.txt"), "keep").unwrap(),
+                "running" => {
+                    f.app
+                        .with_thread_mut("workspace-1", "thread-1", |t| {
+                            t.status = ThreadStatus::Running
+                        })
+                        .await
+                        .unwrap();
+                }
+                "queued" => {
+                    let request: SendTurnRequest=serde_json::from_value(serde_json::json!({"workspace_id":"workspace-1","thread_id":"thread-1","inputs":[{"type":"text","text":"queued"}]})).unwrap();
+                    try_enqueue_turn(&f.app, &request, &request.inputs, None, true, true)
+                        .await
+                        .unwrap();
+                    f.app
+                        .with_thread_mut("workspace-1", "thread-1", |t| {
+                            t.updated_at = Utc::now() - chrono::Duration::days(20)
+                        })
+                        .await
+                        .unwrap();
+                }
+                "recent_thread" => {
+                    f.app
+                        .with_thread_mut("workspace-1", "thread-1", |t| t.updated_at = Utc::now())
+                        .await
+                        .unwrap();
+                }
+                _ => std::fs::write(path.join("a.txt"), "recent").unwrap(),
+            }
+            f.app.storage_cleanup(true).await.unwrap();
+            assert!(path.join("node_modules/example/cache.js").exists(), "{reason}");
+            assert!(path.join("a.txt").exists(), "{reason}");
+        }
+    }
+    #[tokio::test]
+    async fn storage_policy_clears_only_ignored_caches_and_reclaims_archived_or_old_clean_checkouts()
+     {
+        use falcondeck_core::storage::StoragePreferences;
+        let f = storage_fixture().await;
+        f.app
+            .update_storage_preferences(StoragePreferences {
+                reclaim_checkouts: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(
+            !std::path::Path::new(&f.variant.path)
+                .join("node_modules/example/cache.js")
+                .exists()
+        );
+        assert!(std::path::Path::new(&f.variant.path).join("a.txt").exists());
+        for archived in [false, true] {
+            let f = storage_fixture().await;
+            if archived {
+                f.app
+                    .with_thread_mut("workspace-1", "thread-1", |t| {
+                        t.is_archived = true;
+                        t.status = ThreadStatus::Error;
+                        t.updated_at = Utc::now() - chrono::Duration::days(2);
+                    })
+                    .await
+                    .unwrap();
+            }
+            f.app.storage_cleanup(true).await.unwrap();
+            assert!(
+                !std::path::Path::new(&f.variant.path).exists(),
+                "archived={archived}"
+            );
+            assert!(
+                f.app
+                    .thread_summary("workspace-1", "thread-1")
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                !VariantFixture::git_at(
+                    &f.project,
+                    &[
+                        "show-ref",
+                        "--verify",
+                        &format!("refs/heads/{}", f.variant.branch)
+                    ]
+                )
+                .is_empty()
+            );
+            assert!(
+                crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn storage_old_artifacts_are_candidates_even_with_legacy_opt_in() {
+        let f = storage_fixture().await;
+        let artifact = f.root.path().join("artifacts/old");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join("report"), "keep").unwrap();
+        fn old(p: &std::path::Path) {
+            if p.is_dir() {
+                for e in std::fs::read_dir(p).unwrap() {
+                    old(&e.unwrap().path());
+                }
+            }
+            std::fs::File::open(p)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400),
+                )
+                .unwrap();
+        }
+        old(&artifact);
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(artifact.exists());
+        std::fs::write(f.root.path().join("storage-preferences.json"),r#"{"delete_old_artifacts":true,"delete_old_experiments":true}"#).unwrap();
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(artifact.exists(), "Legacy opt-in must never delete candidate artifacts");
+        assert!(f.project.join("a.txt").exists());
+    }
+    #[tokio::test]
+    async fn storage_cleanup_keeps_ownership_when_the_request_disconnects() {
+        use falcondeck_core::storage::{StorageAction, StorageActionRequest};
+        let f = storage_fixture().await;
+        let gate = f.app.variant_gate("workspace-1", "thread-1").await;
+        let held = gate.lock().await;
+        let app = f.app.clone();
+        let caller = tokio::spawn(async move {
+            app.storage_variant_action(StorageActionRequest {
+                workspace_id: "workspace-1".into(),
+                thread_id: "thread-1".into(),
+                action: StorageAction::ClearCaches,
+                confirmed: true,
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if f.app.inner.storage_gate.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        drop(held);
+        let cache = std::path::Path::new(&f.variant.path).join("node_modules");
+        // Join the daemon-owned operation through its serialization gate,
+        // rather than assuming process inventory finishes within ten seconds.
+        let completed = f.app.inner.storage_gate.lock().await;
+        drop(completed);
+        assert!(
+            !cache.join("example/cache.js").exists(),
+            "cleanup result: {}",
+            std::fs::read_to_string(f.root.path().join("storage-runs.json")).unwrap_or_default()
+        );
+        assert!(std::path::Path::new(&f.variant.path).join("a.txt").exists());
+        f.app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_dirty_cache_cleanup_ignores_cache_recency_but_preserves_authored_files() {
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join("a.txt"), "old dirty edit").unwrap();
+        std::fs::write(path.join("authored.txt"), "old untracked work").unwrap();
+        age_storage_tree(path);
+        std::fs::write(
+            path.join("node_modules/example/cache.js"),
+            "recent cache activity",
+        )
+        .unwrap();
+        f.app.storage_cleanup(true).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("node_modules/example/cache.js")).unwrap(),
+            "recent cache activity"
+        );
+        assert!(!path.join("node_modules/example/unchanged.js").exists());
+        assert_eq!(
+            std::fs::read_to_string(path.join("a.txt")).unwrap(),
+            "old dirty edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("authored.txt")).unwrap(),
+            "old untracked work"
+        );
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn storage_manual_snapshot_round_trips_dirty_files_without_moving_branch_or_index() {
+        use falcondeck_core::storage::{StorageSnapshotRequest, StorageSnapshotTarget};
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        for name in ["deleted.txt", "renamed.txt", "binary.dat"] {
+            std::fs::write(path.join(name), b"baseline").unwrap();
+        }
+        VariantFixture::git_at(path, &["add", "."]);
+        VariantFixture::git_at(path, &["commit", "-m", "unpublished baseline"]);
+        let head = VariantFixture::git_at(path, &["rev-parse", "HEAD"]);
+        std::fs::write(path.join("a.txt"), "edited tracked").unwrap();
+        std::fs::write(path.join("new.txt"), "untracked addition").unwrap();
+        std::fs::remove_file(path.join("deleted.txt")).unwrap();
+        std::fs::rename(path.join("renamed.txt"), path.join("new-name.txt")).unwrap();
+        let binary = [0, 255, 12, 0, 128, 42];
+        std::fs::write(path.join("binary.dat"), binary).unwrap();
+        age_storage_tree(path);
+        age_storage_tree(&f.project.join(".git"));
+        let index = VariantFixture::git_at(
+            path,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        let index_before = std::fs::read(&index).unwrap();
+        let snapshot = crate::variant::snapshot::create(&f.variant.path, &f.variant.slug)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&index).unwrap(), index_before);
+        assert_eq!(VariantFixture::git_at(path, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            VariantFixture::git_at(path, &["rev-parse", "--symbolic-full-name", "HEAD"]),
+            format!("refs/heads/{}", f.variant.branch)
+        );
+        crate::variant::snapshot::verify(&f.variant.path, &snapshot)
+            .await
+            .unwrap();
+        let run = f
+            .app
+            .storage_snapshot_batch(StorageSnapshotRequest {
+                confirmed: true,
+                targets: vec![StorageSnapshotTarget {
+                    workspace_id: "workspace-1".into(),
+                    thread_id: "thread-1".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(!path.exists(), "{:?}", run.entries);
+        assert!(
+            crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap()
+        );
+        assert_eq!(VariantFixture::git_at(path, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            std::fs::read_to_string(path.join("a.txt")).unwrap(),
+            "edited tracked"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("new.txt")).unwrap(),
+            "untracked addition"
+        );
+        assert!(!path.join("deleted.txt").exists());
+        assert!(!path.join("renamed.txt").exists());
+        assert_eq!(
+            std::fs::read(path.join("new-name.txt")).unwrap(),
+            b"baseline"
+        );
+        assert_eq!(std::fs::read(path.join("binary.dat")).unwrap(), binary);
+        assert_eq!(
+            VariantFixture::git_at(path, &["diff", "--cached", "--name-only"]),
+            ""
+        );
+        assert!(VariantFixture::git_at(path, &["status", "--porcelain"]).contains("?? new.txt"));
+        assert!(
+            !crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap()
+        );
+    }
+    #[tokio::test]
+    async fn storage_snapshot_verification_failure_keeps_late_edits_and_checkout() {
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join("a.txt"), "snapshot").unwrap();
+        let assessment =
+            crate::variant::assess_for_snapshot(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap();
+        let snapshot = crate::variant::snapshot::create(&f.variant.path, &f.variant.slug)
+            .await
+            .unwrap();
+        std::fs::write(path.join("a.txt"), "late edit").unwrap();
+        let result = crate::variant::finish_snapshot_reclaim(
+            f.project.to_str().unwrap(),
+            &f.variant,
+            assessment,
+            snapshot,
+        )
+        .await;
+        assert!(matches!(result, crate::variant::Reclaim::Kept(_)));
+        assert_eq!(
+            std::fs::read_to_string(path.join("a.txt")).unwrap(),
+            "late edit"
+        );
+    }
+    #[tokio::test]
+    async fn storage_snapshot_restores_a_checkout_with_every_tracked_file_deleted() {
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::remove_file(path.join("a.txt")).unwrap();
+        let assessment =
+            crate::variant::assess_for_snapshot(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap();
+        let snapshot = crate::variant::snapshot::create(&f.variant.path, &f.variant.slug)
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::variant::finish_snapshot_reclaim(
+                f.project.to_str().unwrap(),
+                &f.variant,
+                assessment,
+                snapshot
+            )
+            .await,
+            crate::variant::Reclaim::Quarantined(_)
+        ));
+        assert!(
+            crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap()
+        );
+        assert!(!path.join("a.txt").exists());
+        assert!(
+            !crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_snapshot_preserves_sparse_omissions_and_additions_outside_recipe() {
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::create_dir(path.join("excluded")).unwrap();
+        std::fs::write(path.join("excluded/baseline.txt"), "omitted baseline").unwrap();
+        VariantFixture::git_at(path, &["add", "."]);
+        VariantFixture::git_at(path, &["commit", "-m", "sparse baseline"]);
+        VariantFixture::git_at(
+            path,
+            &["sparse-checkout", "set", "--no-cone", "/*", "!/excluded/"],
+        );
+        assert!(!path.join("excluded").exists());
+        std::fs::create_dir(path.join("excluded")).unwrap();
+        std::fs::write(path.join("excluded/new.txt"), "outside addition").unwrap();
+        std::fs::write(path.join("a.txt"), "sparse edit").unwrap();
+        let assessment =
+            crate::variant::assess_for_snapshot(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap();
+        let snapshot = crate::variant::snapshot::create(&f.variant.path, &f.variant.slug)
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::variant::finish_snapshot_reclaim(
+                f.project.to_str().unwrap(),
+                &f.variant,
+                assessment,
+                snapshot
+            )
+            .await,
+            crate::variant::Reclaim::Quarantined(_)
+        ));
+        assert!(
+            crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap()
+        );
+        assert!(!path.join("excluded/baseline.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(path.join("excluded/new.txt")).unwrap(),
+            "outside addition"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("a.txt")).unwrap(),
+            "sparse edit"
+        );
+    }
+    #[tokio::test]
+    async fn storage_snapshot_refuses_lossy_git_normalization() {
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+        std::fs::write(path.join("a.txt"), b"authored\r\n").unwrap();
+        assert!(
+            crate::variant::snapshot::create(&f.variant.path, &f.variant.slug)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("a.txt")).unwrap(), b"authored\r\n");
+    }
+    #[tokio::test]
+    async fn storage_cache_cleanup_keeps_tracked_descendants() {
+        use falcondeck_core::storage::{StorageAction, StorageActionRequest};
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join("node_modules/authored"), "tracked work").unwrap();
+        VariantFixture::git_at(path, &["add", "-f", "node_modules/authored"]);
+        age_storage_tree(path);
+        f.app
+            .storage_variant_action(StorageActionRequest {
+                workspace_id: "workspace-1".into(),
+                thread_id: "thread-1".into(),
+                action: StorageAction::ClearCaches,
+                confirmed: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("node_modules/authored")).unwrap(),
+            "tracked work"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_clean_unpublished_branch_is_quarantined_after_twenty_four_idle_hours() {
+        let f=storage_fixture().await;let path=std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join("a.txt"),"unpublished commit").unwrap();
+        VariantFixture::git_at(path,&["add","a.txt"]);VariantFixture::git_at(path,&["commit","-m","unpublished"]);
+        let head=VariantFixture::git_at(path,&["rev-parse","HEAD"]);
+        age_storage_tree(path);age_storage_tree(&f.project.join(".git"));
+        f.app.with_managed_thread_mut("workspace-1","thread-1",|t|t.summary.updated_at=Utc::now()-chrono::Duration::hours(25)).await.unwrap();
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(!path.exists());
+        assert_eq!(VariantFixture::git_at(&f.project,&["rev-parse",&f.variant.branch]),head);
+        assert!(crate::variant::restore(f.project.to_str().unwrap(),&f.variant).await.unwrap());
+        assert_eq!(std::fs::read_to_string(path.join("a.txt")).unwrap(),"unpublished commit");
+    }
+
+    #[tokio::test]
+    async fn storage_snapshot_marker_does_not_authorize_later_incomplete_checkout() {
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::write(path.join("a.txt"), "snapshot edit").unwrap();
+        let assessment =
+            crate::variant::assess_for_snapshot(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap();
+        let snapshot = crate::variant::snapshot::create(&f.variant.path, &f.variant.slug)
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::variant::finish_snapshot_reclaim(
+                f.project.to_str().unwrap(),
+                &f.variant,
+                assessment,
+                snapshot
+            )
+            .await,
+            crate::variant::Reclaim::Quarantined(_)
+        ));
+        assert!(
+            crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap()
+        );
+        for name in VariantFixture::git_at(path, &["ls-tree", "-r", "--name-only", "HEAD"]).lines() {
+            let file = path.join(name);
+            if file.is_file() { std::fs::remove_file(file).unwrap(); }
+        }
+        assert!(
+            crate::variant::restore(f.project.to_str().unwrap(), &f.variant)
+                .await
+                .unwrap_err()
+                .contains("not populated")
+        );
+    }
+    #[tokio::test]
+    async fn storage_sparse_omissions_do_not_break_inventory_or_cache_cleanup() {
+        use falcondeck_core::storage::StoragePreferences;
+        let f = storage_fixture().await;
+        let path = std::path::Path::new(&f.variant.path);
+        std::fs::create_dir_all(path.join("omitted/deep")).unwrap();
+        std::fs::write(
+            path.join("omitted/deep/data.txt"),
+            "tracked omitted content",
+        )
+        .unwrap();
+        VariantFixture::git_at(path, &["add", "omitted"]);
+        VariantFixture::git_at(path, &["commit", "-m", "sparse source"]);
+        VariantFixture::git_at(
+            path,
+            &["sparse-checkout", "set", "--no-cone", "/*", "!/omitted/"],
+        );
+        assert!(!path.join("omitted").exists());
+        age_storage_tree(path);
+        age_storage_tree(&f.project.join(".git"));
+        f.app
+            .update_storage_preferences(StoragePreferences {
+                reclaim_checkouts: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let report = f.app.storage_report().await.unwrap();
+        assert!(report.variants[0].cache_blocked.is_none());
+        f.app.storage_cleanup(true).await.unwrap();
+        assert!(!path.join("node_modules/example/cache.js").exists());
+        assert!(path.join("a.txt").exists());
+        assert!(!path.join("omitted").exists());
+        assert_eq!(
+            VariantFixture::git_at(path, &["show", "HEAD:omitted/deep/data.txt"]),
+            "tracked omitted content"
+        );
+    }
+    #[tokio::test]
+    async fn storage_recent_deleted_or_replaced_source_directory_is_protected() {
+        for replacement in [false, true] {
+            let f = storage_fixture().await;
+            let path = std::path::Path::new(&f.variant.path);
+            std::fs::create_dir_all(path.join("removed/deep")).unwrap();
+            std::fs::write(path.join("removed/deep/data.txt"), "tracked source").unwrap();
+            VariantFixture::git_at(path, &["add", "removed"]);
+            VariantFixture::git_at(path, &["commit", "-m", "source tree"]);
+            age_storage_tree(path);
+            age_storage_tree(&f.project.join(".git"));
+            std::fs::remove_dir_all(path.join("removed")).unwrap();
+            if replacement {
+                std::fs::write(path.join("removed"), "replacement source file").unwrap();
+            }
+            let report = f.app.storage_report().await.unwrap();
+            assert!(report.variants[0].cache_blocked.is_some());
+            f.app.storage_cleanup(true).await.unwrap();
+            assert!(path.join("node_modules").exists());
+        }
+    }
 }

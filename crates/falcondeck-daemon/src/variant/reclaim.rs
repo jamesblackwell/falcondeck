@@ -1,16 +1,6 @@
-//! Lifecycle cleanup for worktree variants.
-//!
-//! A variant is plumbing for a thread. Once the thread is archived, its
-//! checkout only costs disk (a Quizgecko worktree is ~2 GB with dependencies),
-//! so archiving tries to reclaim it, but only when nothing would be lost:
-//! the tree is clean, every commit is on `origin` (by patch-id, so
-//! rebased/cherry-picked copies count), and the only ignored files are
-//! rebuildable. Anything else is kept and reported; the branch is always kept.
-//!
-//! These rules mirror `scripts/worktree-gc.mjs` (keep them in step; the
-//! rationale is in `docs/WORKTREE-LIFECYCLE.md`). Checking the remote never
-//! writes to the project repository: `ls-remote` supplies the real tips and
-//! the objects behind them are fetched into a scratch object directory.
+//! Safe lifecycle reclamation: local branch and index checkpoints survive, and
+//! checkout removal follows a verified, recoverable quarantine. Ignored data
+//! is privately preserved unless it passes the shared positive cache proof.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -21,24 +11,6 @@ use tokio::{fs, process::Command, time::timeout};
 
 use super::{matches_allowlist, run_git};
 
-/// Directories a build or install recreates; ignored files inside them never
-/// block reclaiming.
-const REBUILDABLE: &[&str] = &[
-    "node_modules",
-    "/vendor",
-    "/target",
-    ".next",
-    "/dist",
-    "/frontend/dist",
-    ".phpunit.cache",
-    ".react-router",
-    "__pycache__",
-    ".pytest_cache",
-    "/bootstrap/cache",
-    "/storage/framework/cache",
-    "/storage/framework/views",
-];
-
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -46,14 +18,16 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
 pub enum Reclaim {
     /// The checkout is gone (removed now, or already missing).
     Removed,
+    /// Checkout renamed aside and retained through the recoverable grace period.
+    Quarantined(String),
+    /// Removal may be partial; restore must replay the durable checkpoint.
+    RecoveryRequired(Vec<String>),
     /// The checkout stays on disk; each entry is a human-readable reason.
     Kept(Vec<String>),
 }
 
-/// Removes the variant's worktree if it is provably safe to do so.
-///
-/// Uses `git worktree remove` without `--force`, so git itself refuses if the
-/// tree turned dirty after the assessment. The branch is never deleted.
+/// Moves a provably safe checkout into recoverable quarantine.
+/// A later purge repeats verification after the grace period; the branch stays.
 pub async fn reclaim_if_safe(project_path: &str, variant: &ThreadVariant) -> Reclaim {
     match assess(project_path, variant).await {
         Ok(assessment) => finish_reclaim(project_path, variant, assessment).await,
@@ -63,13 +37,28 @@ pub async fn reclaim_if_safe(project_path: &str, variant: &ThreadVariant) -> Rec
 
 pub(crate) struct Assessment {
     head: String,
+    snapshot: Option<super::snapshot::Snapshot>,
+    requires_snapshot: bool,
 }
 
-/// Network work runs before taking the app's admission gate. A ticket never
+/// Assessment runs before taking the app's admission gate. A ticket never
 /// authorizes removal by itself: finish_reclaim repeats all local checks.
 pub(crate) async fn assess(
     project_path: &str,
     variant: &ThreadVariant,
+) -> Result<Assessment, Reclaim> {
+    assess_mode(project_path, variant, false).await
+}
+pub(crate) async fn assess_for_snapshot(
+    project_path: &str,
+    variant: &ThreadVariant,
+) -> Result<Assessment, Reclaim> {
+    assess_mode(project_path, variant, true).await
+}
+async fn assess_mode(
+    project_path: &str,
+    variant: &ThreadVariant,
+    allow_dirty: bool,
 ) -> Result<Assessment, Reclaim> {
     if variant.kind != ThreadVariantKind::Worktree {
         return Err(Reclaim::Kept(vec!["not a worktree variant".into()]));
@@ -80,13 +69,29 @@ pub(crate) async fn assess(
     let head = run_git(&variant.path, &["rev-parse", "HEAD"])
         .await
         .map_err(|e| Reclaim::Kept(vec![e.to_string()]))?;
-    let blockers = blockers(project_path, variant).await;
+    let blockers = blockers_mode(project_path, variant, allow_dirty).await;
     if !blockers.is_empty() {
         return Err(Reclaim::Kept(blockers));
     }
-    Ok(Assessment { head })
+    Ok(Assessment {
+        head,
+        snapshot: None,
+        requires_snapshot: allow_dirty,
+    })
 }
 
+pub(crate) async fn finish_snapshot_reclaim(
+    project: &str,
+    variant: &ThreadVariant,
+    mut assessment: Assessment,
+    snapshot: super::snapshot::Snapshot,
+) -> Reclaim {
+    if assessment.head.trim() != snapshot.head {
+        return Reclaim::Kept(vec!["Snapshot HEAD differs from assessed branch".into()]);
+    }
+    assessment.snapshot = Some(snapshot);
+    finish_reclaim(project, variant, assessment).await
+}
 pub(crate) async fn finish_reclaim(
     project_path: &str,
     variant: &ThreadVariant,
@@ -95,11 +100,14 @@ pub(crate) async fn finish_reclaim(
     if !Path::new(&variant.path).exists() {
         return Reclaim::Removed;
     }
-    // Remote verification can be slow; recheck local state and processes at
-    // the destructive boundary as well as before the network call.
-    let mut fresh = checkout_identity(variant).await;
+    if assessment.requires_snapshot && assessment.snapshot.is_none() {
+        return Reclaim::Kept(vec!["Manual snapshot authorization is missing".into()]);
+    }
+    // Recheck local state and processes at the mutation boundary; an earlier
+    // assessment never authorizes removal by itself.
+    let mut fresh = checkout_identity(project_path,variant).await;
     fresh.extend(
-        status_blockers(project_path, &variant.path)
+        status_blockers_mode(project_path, &variant.path, assessment.snapshot.is_some())
             .await
             .unwrap_or_else(|e| vec![e]),
     );
@@ -117,20 +125,20 @@ pub(crate) async fn finish_reclaim(
     if !fresh.is_empty() {
         return Reclaim::Kept(fresh);
     }
-    let setup = match super::setup::restore_setup(project_path, &variant.slug).await {
-        Ok(setup) => setup,
-        Err(e) => return Reclaim::Kept(vec![format!("could not preserve checkout setup: {e}")]),
+    if let Err(e)=super::setup::preserve_for_reclaim(project_path,&variant.slug,Path::new(&variant.path),assessment.snapshot.is_none()).await {
+        return Reclaim::Kept(vec![e.to_string()]);
+    }
+    let snapshot=match assessment.snapshot {
+        Some(s)=>s,
+        None=>match super::snapshot::create(&variant.path,&variant.slug).await {
+            Ok(s)=>s,Err(e)=>return Reclaim::Kept(vec![e.to_string()]),
+        }
     };
-    if let Err(e) =
-        super::setup::save_setup(project_path, &variant.slug, Path::new(&variant.path), setup).await
-    {
-        return Reclaim::Kept(vec![format!("could not preserve checkout setup: {e}")]);
+    if let Err(e)=super::snapshot::verify(&variant.path,&snapshot).await {return Reclaim::Kept(vec![e.to_string()]);}
+    match super::quarantine::stage(project_path,variant,Path::new(&variant.path),Some(snapshot)).await {
+        Ok(r)=>Reclaim::Quarantined(r.path.to_string_lossy().into_owned()),
+        Err(e)=>Reclaim::RecoveryRequired(vec![e.to_string()]),
     }
-    if let Err(error) = run_git(project_path, &["worktree", "remove", &variant.path]).await {
-        return Reclaim::Kept(vec![format!("git worktree remove refused: {error}")]);
-    }
-    let _ = run_git(project_path, &["worktree", "prune"]).await;
-    Reclaim::Removed
 }
 
 /// Recreates a reclaimed worktree at its original path from the kept branch,
@@ -140,9 +148,21 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
     if variant.kind != ThreadVariantKind::Worktree {
         return Ok(false);
     }
+    if let (Ok(actual),Ok(main))=(fs::canonicalize(&variant.path).await,fs::canonicalize(project_path).await){
+        if actual==main{return Err("Main checkouts are protected".into())}
+    }
+    super::quarantine::recover_caches(project_path,variant).await.map_err(|e|e.to_string())?;
+    if super::quarantine::recover(project_path,variant).await.map_err(|e|e.to_string())? {return Ok(true)}
     if Path::new(&variant.path).exists() {
-        super::populated(&variant.path).await?;
-        return Ok(false);
+        if let Some(saved)=super::snapshot::load(project_path,&variant.slug).await.map_err(|e|e.to_string())?.filter(|s|s.pending) {
+            if super::snapshot::verify(&variant.path,&saved).await.is_ok() {
+                super::snapshot::mark_restored(project_path,&variant.slug,&variant.path,&saved).await.map_err(|e|e.to_string())?;
+                return Ok(false)
+            }
+            // A surviving tracked file is not proof of complete removal rollback.
+            // Keep every remaining byte before applying the pending checkpoint.
+            super::quarantine::preserve_partial(project_path,variant,saved).await.map_err(|e|e.to_string())?;
+        }else{super::populated(&variant.path).await?;return Ok(false)}
     }
     let reference = format!("refs/heads/{}", variant.branch);
     if run_git(project_path, &["show-ref", "--verify", &reference])
@@ -157,42 +177,78 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
     let setup = super::setup::restore_setup(project_path, &variant.slug)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = run_git(project_path, &["worktree", "prune"]).await;
-    super::populate_worktree(
+    let allow_duplicate=super::quarantine::allows_duplicate_restore(project_path,variant).await.map_err(|e|e.to_string())?
+        || missing_recorded_checkout(project_path,variant).await?;
+    super::populate_worktree_mode(
         project_path,
         Path::new(&variant.path),
         &variant.branch,
         &variant.slug,
         false,
         setup,
+        allow_duplicate,
     )
     .await
     .map_err(|e| format!("could not recreate {}: {e}", variant.path))?;
     Ok(true)
 }
 
+// External removal can leave the exact old registration behind. Allow a new
+// staging registration only for that absent recorded path and branch. Preserve
+// the old administration/index; never globally prune other recoverable work.
+async fn missing_recorded_checkout(project: &str, variant: &ThreadVariant) -> Result<bool,String> {
+    if !matches!(fs::symlink_metadata(&variant.path).await,Err(e) if e.kind()==std::io::ErrorKind::NotFound) { return Ok(false); }
+    let listed=run_git(project,&["worktree","list","--porcelain","-z"]).await.map_err(|e|e.to_string())?;
+    let expected_path=format!("worktree {}",variant.path);
+    let expected_branch=format!("branch refs/heads/{}",variant.branch);
+    let mut found=false;
+    for record in listed.split("\0\0") {
+        let fields=record.split('\0').collect::<Vec<_>>();
+        if !fields.contains(&expected_branch.as_str()) { continue; }
+        if !fields.contains(&expected_path.as_str()) || fields.iter().any(|f|f.starts_with("locked") || *f=="detached") { return Ok(false); }
+        found=true;
+    }
+    Ok(found)
+}
+
 /// Reasons the checkout must be kept; empty means safe to remove.
-async fn blockers(project_path: &str, variant: &ThreadVariant) -> Vec<String> {
-    let mut reasons = checkout_identity(variant).await;
+async fn blockers_mode(
+    project_path: &str,
+    variant: &ThreadVariant,
+    allow_dirty: bool,
+) -> Vec<String> {
+    let mut reasons = checkout_identity(project_path,variant).await;
     if !reasons.is_empty() {
         return reasons;
     }
     if let Err(reason) = process_clear(Path::new(&variant.path)).await {
         return vec![reason];
     }
-    match status_blockers(project_path, &variant.path).await {
+    match status_blockers_mode(project_path, &variant.path, allow_dirty).await {
         Ok(found) => reasons.extend(found),
         Err(error) => return vec![format!("could not read git status: {error}")],
     }
-    match unpushed_commits(project_path, &variant.path).await {
-        Ok(0) => {}
-        Ok(count) => reasons.push(format!("{count} commit(s) not on a remote")),
-        Err(error) => reasons.push(format!("remote state unverified: {error}")),
-    }
+    // The kept local branch pins unpublished commits. Reclamation only removes
+    // checkout files, so remote publication is not a prerequisite.
     reasons
 }
 
 pub(super) async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, String> {
+    status_blockers_mode(project_path, path, false).await
+}
+pub(super) async fn status_blockers_mode(
+    project_path: &str,
+    path: &str,
+    allow_dirty: bool,
+) -> Result<Vec<String>, String> {
+    status_blockers_mode_at(project_path,path,path,allow_dirty).await
+}
+pub(super) async fn status_blockers_mode_at(
+    _project_path: &str,
+    path: &str,
+    _logical: &str,
+    allow_dirty: bool,
+) -> Result<Vec<String>, String> {
     let out = git(
         path,
         &[
@@ -212,38 +268,36 @@ pub(super) async fn status_blockers(project_path: &str, path: &str) -> Result<Ve
     for (code, entry) in parse_status(&out) {
         match code.as_str() {
             "!!" => {
-                if !ignored_safe(project_path, path, &entry).await {
-                    other_ignored.push(entry);
-                }
+                other_ignored.push(entry);
             }
-            "??" => {
-                if !identical_to_project(project_path, path, &entry).await {
-                    untracked += 1;
-                }
-            }
+            "??" => untracked += 1,
             _ => tracked += 1,
         }
     }
-    if tracked > 0 {
+    if tracked > 0 && !allow_dirty {
         reasons.push(format!("{tracked} uncommitted change(s)"));
     }
-    if untracked > 0 {
+    if untracked > 0 && !allow_dirty {
         reasons.push(format!("{untracked} untracked file(s)"));
     }
-    if let Some(first) = other_ignored.first() {
-        reasons.push(format!(
-            "non-rebuildable ignored files: {first}{}",
-            if other_ignored.len() > 1 {
-                format!(" +{}", other_ignored.len() - 1)
-            } else {
-                String::new()
-            }
-        ));
+    if other_ignored.iter().any(|p|!super::private_store::relative(Path::new(p.trim_end_matches('/')))) {
+        reasons.push("Ignored data has unsupported recovery paths; checkout retained".into());
     }
     Ok(reasons)
 }
 
-async fn checkout_identity(variant: &ThreadVariant) -> Vec<String> {
+pub(crate) async fn checkout_identity(project:&str, variant: &ThreadVariant) -> Vec<String> {
+    let path=Path::new(&variant.path);
+    let identity=async {
+        if !path.join(".git").is_file() || path.is_symlink(){return Err("Not a linked worktree".to_string())}
+        let actual=fs::canonicalize(path).await.map_err(|e|e.to_string())?;
+        if fs::canonicalize(project).await.map_err(|e|e.to_string())?==actual{return Err("Main checkouts are protected".into())}
+        let common=run_git(&variant.path,&["rev-parse","--path-format=absolute","--git-common-dir"]).await.map_err(|e|e.to_string())?;
+        let owner=run_git(project,&["rev-parse","--path-format=absolute","--git-common-dir"]).await.map_err(|e|e.to_string())?;
+        if fs::canonicalize(common.trim()).await.map_err(|e|e.to_string())?!=fs::canonicalize(owner.trim()).await.map_err(|e|e.to_string())? {return Err("Worktree belongs to a different project".into())}
+        Ok::<_,String>(())
+    }.await;
+    if let Err(reason)=identity{return vec![reason]}
     if super::dependencies_pending(&variant.path) {
         return vec!["dependency provisioning is still running".into()];
     }
@@ -256,7 +310,7 @@ async fn checkout_identity(variant: &ThreadVariant) -> Vec<String> {
     }
 }
 
-pub(super) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, String> {
+pub(crate) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, String> {
     let mut reasons = Vec::new();
     let files = git(path, &["ls-files", "-v", "-z"], &[], REMOTE_TIMEOUT).await?;
     for entry in files.split('\0').filter(|e| e.len() > 2) {
@@ -301,42 +355,7 @@ pub(super) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, Str
     Ok(reasons)
 }
 
-async fn ignored_safe(project: &str, path: &str, entry: &str) -> bool {
-    let mut pending = vec![entry.to_string()];
-    while let Some(relative) = pending.pop() {
-        if is_rebuildable(&relative) || identical_to_project(project, path, &relative).await {
-            continue;
-        }
-        // Git can collapse storage/framework to one ignored entry. Inspect
-        // only ancestors of allowlisted caches; sessions and logs still block.
-        let prefix = format!("{}/", relative.trim_end_matches('/'));
-        if !REBUILDABLE
-            .iter()
-            .any(|p| p.trim_start_matches('/').starts_with(&prefix))
-        {
-            return false;
-        }
-        let Ok(mut dir) = fs::read_dir(Path::new(path).join(&relative)).await else {
-            return false;
-        };
-        loop {
-            match dir.next_entry().await {
-                Ok(Some(child)) => {
-                    let Ok(kind) = child.file_type().await else {
-                        return false;
-                    };
-                    if kind.is_symlink() {
-                        return false;
-                    }
-                    pending.push(format!("{prefix}{}", child.file_name().to_string_lossy()));
-                }
-                Ok(None) => break,
-                Err(_) => return false,
-            }
-        }
-    }
-    true
-}
+
 
 /// `(XY, path)` pairs from `status --porcelain=v1 -z`; a rename or copy
 /// entry carries its source path as a following field, which is skipped.
@@ -359,21 +378,13 @@ fn parse_status(out: &str) -> Vec<(String, String)> {
 /// Ignored entries that never block: env-file copies the daemon made at
 /// creation (the project folder holds the original) and rebuildable output.
 fn is_rebuildable(entry: &str) -> bool {
-    let segments: Vec<_> = entry.split('/').filter(|p| !p.is_empty()).collect();
-    REBUILDABLE.iter().any(|pattern| {
-        let parts: Vec<_> = pattern.trim_start_matches('/').split('/').collect();
-        if pattern.starts_with('/') {
-            segments.starts_with(&parts)
-        } else {
-            segments.windows(parts.len()).any(|window| window == parts)
-        }
-    })
+    super::cache::known_location(entry)
 }
 
 /// Check accessible process cwd and open files from one lsof inventory. An
 /// inventory failure blocks removal, but OS permissions can hide other users'
 /// descriptors even when lsof succeeds. This cannot prove global inactivity.
-pub(super) async fn process_clear(path: &Path) -> Result<(), String> {
+pub(crate) async fn process_clear(path: &Path) -> Result<(), String> {
     let path = fs::canonicalize(path)
         .await
         .map_err(|e| format!("process check: {e}"))?;
@@ -523,7 +534,7 @@ where
 
 /// An untracked allowlisted file passes only when byte-identical to the
 /// project folder's copy; anything else may be work.
-async fn identical_to_project(project_path: &str, path: &str, relative: &str) -> bool {
+pub(crate) async fn identical_to_project(project_path: &str, path: &str, relative: &str) -> bool {
     let name = relative.rsplit('/').next().unwrap_or("");
     if relative.ends_with('/') || !matches_allowlist(name) {
         return false;
@@ -676,13 +687,14 @@ fn parse_ls_remote(out: &str) -> RemoteSnapshot {
 
 /// Runs git without taking optional locks (so `status` never refreshes the
 /// index of a checkout it is only inspecting) and with a deadline.
-async fn git(
+pub(super) async fn git(
     cwd: &str,
     args: &[&str],
     env: &[(&str, &str)],
     deadline: Duration,
 ) -> Result<String, String> {
-    let mut command = Command::new("git");
+    let mut command = Command::new("nice");
+    command.args(["-n", "10", "git"]);
     command
         .args(args)
         .current_dir(cwd)
@@ -815,7 +827,7 @@ mod tests {
     fn benign_ignored_entries_are_env_copies_and_rebuildable_output() {
         assert!(!is_rebuildable(".env"));
         assert!(!is_rebuildable("frontend/.env.local"));
-        assert!(is_rebuildable("apps/web/node_modules/"));
+        assert!(!is_rebuildable("apps/web/node_modules/"));
         assert!(is_rebuildable("target/"));
         assert!(!is_rebuildable(".idea/"));
         assert!(!is_rebuildable("storage/app/uploads/"));
@@ -840,27 +852,22 @@ mod tests {
         commit_file(&v, "b.txt");
         git_sync(Path::new(&v.path), &["push", "origin", &v.branch]);
         std::fs::create_dir(Path::new(&v.path).join("node_modules")).unwrap();
-        std::fs::write(Path::new(&v.path).join("node_modules/x.js"), "x").unwrap();
 
-        assert_eq!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Removed);
+
+        assert!(matches!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Quarantined(_)));
         assert!(!Path::new(&v.path).exists());
         assert!(git_sync(&f.project, &["branch", "--list", &v.branch]).contains(&v.branch));
         assert!(!git_sync(&f.project, &["worktree", "list"]).contains("variants/safe"));
     }
 
     #[tokio::test]
-    async fn unpushed_commits_keep_the_worktree() {
-        let f = Fixture::new();
-        let v = f.variant("unpushed");
-        commit_file(&v, "c.txt");
-        let Reclaim::Kept(reasons) = reclaim_if_safe(f.project_str(), &v).await else {
-            panic!("unpushed work must be kept");
-        };
-        assert!(
-            reasons.iter().any(|r| r.contains("not on a remote")),
-            "{reasons:?}"
-        );
-        assert!(Path::new(&v.path).exists());
+    async fn unpushed_commits_are_kept_on_the_branch_while_the_checkout_is_quarantined() {
+        let f=Fixture::new();let v=f.variant("unpushed");commit_file(&v,"c.txt");
+        let head=git_sync(Path::new(&v.path),&["rev-parse","HEAD"]);
+        assert!(matches!(reclaim_if_safe(f.project_str(),&v).await,Reclaim::Quarantined(_)));
+        assert_eq!(git_sync(&f.project,&["rev-parse",&v.branch]),head);
+        assert!(restore(f.project_str(),&v).await.unwrap());
+        assert!(Path::new(&v.path).join("c.txt").exists());
     }
 
     #[tokio::test]
@@ -882,11 +889,11 @@ mod tests {
         git_sync(&f.project, &["push", "origin", "main"]);
         assert_ne!(git_sync(&f.project, &["rev-parse", "HEAD"]), sha);
 
-        assert_eq!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Removed);
+        assert!(matches!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Quarantined(_)));
     }
 
     #[tokio::test]
-    async fn dirty_untracked_and_unknown_ignored_files_keep_the_worktree() {
+    async fn dirty_and_untracked_stay_while_ignored_configuration_is_preserved() {
         let f = Fixture::new();
         let dirty = f.variant("dirty");
         std::fs::write(Path::new(&dirty.path).join("a.txt"), "changed\n").unwrap();
@@ -896,7 +903,7 @@ mod tests {
         std::fs::create_dir(Path::new(&ignored.path).join(".idea")).unwrap();
         std::fs::write(Path::new(&ignored.path).join(".idea/w.xml"), "x").unwrap();
 
-        for v in [&dirty, &untracked, &ignored] {
+        for v in [&dirty, &untracked] {
             assert!(
                 matches!(reclaim_if_safe(f.project_str(), v).await, Reclaim::Kept(_)),
                 "{} should be kept",
@@ -904,35 +911,68 @@ mod tests {
             );
             assert!(Path::new(&v.path).exists());
         }
+        assert!(matches!(
+            reclaim_if_safe(f.project_str(), &ignored).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = super::super::quarantine::records(f.project_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.variant == ignored)
+            .unwrap();
+        assert_eq!(
+            super::super::quarantine::purge(
+                &r,
+                r.created_at + super::super::quarantine::GRACE_SECONDS + 1
+            )
+            .await
+            .unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(restore(f.project_str(), &ignored).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&ignored.path).join(".idea/w.xml")).unwrap(),
+            "x"
+        );
     }
 
     #[tokio::test]
-    async fn copied_env_files_do_not_block() {
+    async fn differing_env_files_are_kept_privately_and_restored() {
         let f = Fixture::new();
         std::fs::write(f.project.join(".env"), "KEY=1\n").unwrap();
         let v = f.variant("env");
         std::fs::write(Path::new(&v.path).join(".env"), "KEY=2\n").unwrap();
         assert!(matches!(
             reclaim_if_safe(f.project_str(), &v).await,
-            Reclaim::Kept(_)
+            Reclaim::Quarantined(_)
         ));
+        let r = super::super::quarantine::records(f.project_str())
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            super::super::quarantine::purge(
+                &r,
+                r.created_at + super::super::quarantine::GRACE_SECONDS + 1
+            )
+            .await
+            .unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(restore(f.project_str(), &v).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&v.path).join(".env")).unwrap(),
+            "KEY=2\n"
+        );
     }
 
     #[tokio::test]
-    async fn unreachable_remote_keeps_the_worktree() {
-        let f = Fixture::new();
-        let v = f.variant("offline");
-        git_sync(
-            &f.project,
-            &["remote", "set-url", "origin", "/nonexistent/origin.git"],
-        );
-        let Reclaim::Kept(reasons) = reclaim_if_safe(f.project_str(), &v).await else {
-            panic!("an unverifiable remote must keep the worktree");
-        };
-        assert!(
-            reasons.iter().any(|r| r.contains("unverified")),
-            "{reasons:?}"
-        );
+    async fn unavailable_remote_does_not_block_local_branch_preservation() {
+        let f=Fixture::new();let v=f.variant("offline");
+        git_sync(&f.project,&["remote","set-url","origin","/nonexistent/origin.git"]);
+        assert!(matches!(reclaim_if_safe(f.project_str(),&v).await,Reclaim::Quarantined(_)));
+        assert!(restore(f.project_str(),&v).await.unwrap());
     }
 
     #[tokio::test]
@@ -1036,15 +1076,29 @@ mod tests {
         let f = Fixture::new();
         std::fs::write(f.project.join(".env"), "KEY=1\n").unwrap();
         let v = f.variant("back");
+        std::fs::write(Path::new(&v.path).join(".env"), "KEY=1\n").unwrap();
         commit_file(&v, "kept.txt");
         git_sync(Path::new(&v.path), &["push", "origin", &v.branch]);
-        assert_eq!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Removed);
+        assert!(matches!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Quarantined(_)));
 
         assert_eq!(restore(f.project_str(), &v).await, Ok(true));
         assert!(Path::new(&v.path).join("kept.txt").exists());
         assert!(Path::new(&v.path).join(".env").exists());
         // Already present: nothing to do.
         assert_eq!(restore(f.project_str(), &v).await, Ok(false));
+    }
+    #[tokio::test]
+    async fn externally_removed_checkout_restores_without_pruning_other_registrations() {
+        let f=Fixture::new(); let v=f.variant("external-removal");
+        let other=f.variant("keep-administration");
+        let other_index=git_sync(Path::new(&other.path), &["rev-parse","--path-format=absolute","--git-path","index"]);
+        std::fs::remove_dir_all(&v.path).unwrap();
+        std::fs::remove_dir_all(&other.path).unwrap();
+        assert_eq!(restore(f.project_str(),&v).await,Ok(true));
+        assert!(Path::new(&v.path).join("a.txt").exists());
+        assert!(Path::new(&other_index).exists(),"another missing checkout's index must remain recoverable");
+        let listed=git_sync(&f.project,&["worktree","list","--porcelain"]);
+        assert!(listed.contains(&other.path));
     }
     #[tokio::test]
     async fn process_inside_worktree_refuses_reclaim() {
@@ -1066,37 +1120,42 @@ mod tests {
     }
 
     #[test]
-    fn framework_cache_allowlist_does_not_include_sessions_or_logs() {
-        for path in [
-            ".phpunit.cache/result",
-            "frontend/.react-router/types",
-            "bootstrap/cache/packages.php",
-            "storage/framework/cache/x",
-            "storage/framework/views/a.php",
-        ] {
-            assert!(is_rebuildable(path), "{path}");
-        }
-        for path in [
-            "storage/framework/sessions/session",
-            "storage/logs/laravel.log",
-            "storage/app/file",
-            "bootstrap/cache-backup/x",
-        ] {
-            assert!(!is_rebuildable(path), "{path}");
-        }
+    fn generic_framework_paths_require_manual_preservation() {
+        for path in ["storage/framework/cache","storage/framework/views","storage/framework/sessions","storage/logs","bootstrap/cache","build","public/vendor","resources/views/vendor"] {assert!(!is_rebuildable(path),"{path}");}
     }
+
     #[tokio::test]
-    async fn collapsed_framework_directory_keeps_sessions_but_allows_compiled_cache() {
+    async fn collapsed_framework_directory_does_not_authorize_ignored_data_deletion() {
         let f = Fixture::new();
-        let v = f.variant("collapsed");
-        let root = Path::new(&v.path).join("storage/framework");
-        std::fs::create_dir_all(root.join("cache")).unwrap();
-        std::fs::write(root.join("cache/generated"), "cache").unwrap();
-        assert!(ignored_safe(f.project_str(), &v.path, "storage/").await);
-        std::fs::create_dir_all(root.join("sessions")).unwrap();
-        std::fs::write(root.join("sessions/session"), "session").unwrap();
-        assert!(!ignored_safe(f.project_str(), &v.path, "storage/").await);
+        let v = f.variant("framework");
+        let path = Path::new(&v.path).join("storage/framework/cache");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("authored.php"), "unique").unwrap();
+        std::fs::write(f.project.join(".git/info/exclude"), "storage/\n").unwrap();
+        assert!(matches!(
+            reclaim_if_safe(f.project_str(), &v).await,
+            Reclaim::Quarantined(_)
+        ));
+        let r = super::super::quarantine::records(f.project_str())
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            super::super::quarantine::purge(
+                &r,
+                r.created_at + super::super::quarantine::GRACE_SECONDS + 1
+            )
+            .await
+            .unwrap(),
+            Some(Reclaim::Removed)
+        );
+        assert!(restore(f.project_str(), &v).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(path.join("authored.php")).unwrap(),
+            "unique"
+        );
     }
+
     #[tokio::test]
     async fn restore_failure_and_interrupted_checkout_never_admit_an_empty_tree() {
         let f = Fixture::new();
@@ -1309,7 +1368,7 @@ mod tests {
             "vendor/autoload.php",
             "frontend/dist/index.js",
         ] {
-            assert!(is_rebuildable(path), "{path}");
+            assert!(!is_rebuildable(path), "A descendant name alone is insufficient: {path}");
         }
     }
 

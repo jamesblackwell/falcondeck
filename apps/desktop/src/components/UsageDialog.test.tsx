@@ -3,6 +3,10 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { UsageDialog } from './UsageDialog'
 
+// This suite tests dialog behavior. Keep its child from making real daemon
+// requests whose completion can outlive the jsdom environment.
+vi.mock('./settings/UsagePanel', () => ({ UsagePanel: () => <p>Usage information</p> }))
+
 describe('UsageDialog', () => {
   it('renders nothing when closed', () => {
     render(

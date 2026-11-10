@@ -17,11 +17,17 @@ use uuid::Uuid;
 use crate::error::DaemonError;
 
 mod reclaim;
+pub(crate) mod quarantine;
+pub(crate) mod cache;
+pub(crate) mod cache_index;
+pub(crate) mod private_store;
+mod storage_metadata;
+pub(crate) mod snapshot;
 mod setup;
 #[cfg(test)]
 pub(crate) use reclaim::test_no_docker_mounts;
 pub use reclaim::{Reclaim, reclaim_if_safe, restore};
-pub(crate) use reclaim::{assess, finish_reclaim};
+pub(crate) use reclaim::{assess_for_snapshot,finish_snapshot_reclaim,assess, finish_reclaim, process_clear, hidden_or_in_progress};
 pub(crate) use setup::hint as sparse_hint;
 
 /// Untracked files carried into a worktree-backed variant.
@@ -36,6 +42,40 @@ const BRANCH_PREFIX: &str = "falcondeck/";
 /// project; also the branch suffix and the directory name.
 pub fn new_slug() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
+/// Resolve Git pointer paths without requiring their old target to still exist.
+pub(crate) fn git_pointer_path(base: &Path, value: &str) -> PathBuf {
+    let value=Path::new(value);let absolute=if value.is_absolute(){value.to_owned()}else{base.join(value)};
+    let mut result=PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir=>{},
+            std::path::Component::ParentDir=>{result.pop();},
+            component=>result.push(component.as_os_str()),
+        }
+    }
+    result
+}
+/// Bounded Git pointer reads for cheap per-filesystem capacity reporting.
+pub(crate) async fn git_storage_paths(project: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let dot=project.join(".git");let metadata=fs::metadata(&dot).await?;
+    if metadata.is_dir() { return Ok(vec![dot]); }
+    async fn pointer(path: &Path) -> std::io::Result<String> {
+        let m=fs::metadata(path).await?;
+        if !m.is_file() || m.len()>8192 { return Err(std::io::Error::other("Invalid Git pointer")); }
+        fs::read_to_string(path).await
+    }
+    let text=pointer(&dot).await?;
+    let value=text.trim().strip_prefix("gitdir:").map(str::trim).filter(|s|!s.is_empty()).ok_or_else(||std::io::Error::other("Invalid gitdir pointer"))?;
+    let admin=git_pointer_path(project,value);let mut result=vec![admin.clone()];
+    match pointer(&admin.join("commondir")).await {
+        Ok(common) if !common.trim().is_empty()=>result.push(git_pointer_path(&admin,common.trim())),
+        Ok(_)=>return Err(std::io::Error::other("Empty Git common directory pointer")),
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
+        Err(e)=>return Err(e),
+    }
+    Ok(result)
 }
 
 /// Root directory holding every variant of every project.
@@ -131,6 +171,18 @@ async fn populate_worktree(
     new_branch: bool,
     setup: setup::Setup,
 ) -> Result<(), DaemonError> {
+    populate_worktree_mode(project,destination,branch,slug,new_branch,setup,false).await
+}
+
+async fn populate_worktree_mode(
+    project: &str,
+    destination: &Path,
+    branch: &str,
+    slug: &str,
+    new_branch: bool,
+    setup: setup::Setup,
+    allow_duplicate: bool,
+) -> Result<(), DaemonError> {
     let parent = destination
         .parent()
         .ok_or_else(|| DaemonError::Rpc("variant path has no parent".into()))?;
@@ -163,10 +215,10 @@ async fn populate_worktree(
     } else if new_branch {
         add_worktree(project, &staging, branch).await
     } else {
-        run_git(
-            project,
-            &["worktree", "add", "--no-checkout", &stage, branch],
-        )
+        let mut args=vec!["worktree", "add", "--no-checkout"];
+        if allow_duplicate {args.push("--force");}
+        args.extend([&stage,branch]);
+        run_git(project,&args)
         .await
         .map(|_| ())
     };
@@ -187,13 +239,23 @@ async fn populate_worktree(
         }
         setup::provision(project, &staging, &setup).await?;
         populated(&stage).await.map_err(DaemonError::Rpc)?;
-        copy_untracked_allowlist(project, &staging).await;
+        let restored_snapshot=snapshot::apply_pending(project,slug,&stage).await?;
+        if restored_snapshot {copy_allowlist_filtered(project,&staging,true).await;} else {copy_untracked_allowlist(project, &staging).await;}
+        private_store::restore(project,slug,&staging).await?;
         setup::save_setup(project, slug, &staging, setup.clone()).await?;
-        run_git(
-            project,
-            &["worktree", "move", &stage, &destination.to_string_lossy()],
-        )
-        .await?;
+        let destination_text=destination.to_string_lossy();
+        let mut args=vec!["worktree","move"];
+        if allow_duplicate {
+            if !matches!(fs::symlink_metadata(destination).await,Err(e) if e.kind()==std::io::ErrorKind::NotFound) {
+                return Err(DaemonError::Rpc("Restore destination was recreated; retaining it".into()));
+            }
+            // Git's targeted missing-registration override, never global prune.
+            // Existing/locked destinations retain Git's normal protections.
+            args.push("--force");
+        }
+        args.extend([stage.as_ref(),destination_text.as_ref()]);
+        run_git(project,&args).await?;
+        snapshot::finish_restore(project,slug,&destination.to_string_lossy()).await?;
         Ok::<_, DaemonError>(())
     }
     .await;
@@ -309,7 +371,7 @@ async fn recover_staging(
             let blockers = reclaim::status_blockers(project, &path.to_string_lossy())
                 .await
                 .map_err(DaemonError::Rpc)?;
-            if !blockers.is_empty() {
+            if !blockers.is_empty() && (!snapshot::known_staging(&path.to_string_lossy()).await || !reclaim::status_blockers_mode(project,&path.to_string_lossy(),true).await.map_err(DaemonError::Rpc)?.is_empty()) {
                 return Err(DaemonError::Rpc(format!(
                     "Interrupted staging requires review: {}: {}",
                     path.display(),
@@ -370,6 +432,7 @@ pub(crate) async fn populated(path: &str) -> Result<(), String> {
             .filter(|p| !p.is_empty())
             .any(|p| root.join(p).symlink_metadata().is_ok())
     {
+        if snapshot::approved_empty_checkout(path).await {return Ok(());}
         return Err(format!(
             "isolated checkout at {path} is not populated; refusing to run with every tracked file missing"
         ));
@@ -477,8 +540,8 @@ pub async fn remove(project_path: &str, variant: &ThreadVariant) {
         preserve_clone_branch(project_path, variant).await;
     }
     match reclaim_if_safe(project_path, variant).await {
-        Reclaim::Removed => {}
-        Reclaim::Kept(reasons) => {
+        Reclaim::Removed | Reclaim::Quarantined(_) => {}
+        Reclaim::Kept(reasons) | Reclaim::RecoveryRequired(reasons) => {
             tracing::info!(path = %variant.path, reasons = %reasons.join("; "), "kept isolated copy after thread deletion")
         }
     }
@@ -562,8 +625,10 @@ async fn add_worktree(
 /// Copies untracked files matching [`UNTRACKED_ALLOWLIST`] into a worktree
 /// variant. Best-effort: a missing `.env` is a nuisance, not a reason to fail
 /// thread creation.
-async fn copy_untracked_allowlist(project_path: &str, destination: &Path) {
+async fn copy_untracked_allowlist(project_path:&str,destination:&Path) {copy_allowlist_filtered(project_path,destination,false).await;}
+async fn copy_allowlist_filtered(project_path: &str, destination: &Path, ignored_only:bool) {
     for relative in untracked_allowlist_matches(project_path).await {
+        if ignored_only && run_git(&destination.to_string_lossy(),&["check-ignore","-q","--",&relative]).await.is_err(){continue;}
         let source = Path::new(project_path).join(&relative);
         let target = destination.join(&relative);
         if let Some(parent) = target.parent()
@@ -721,6 +786,15 @@ mod tests {
         run_git(path.to_str().unwrap(), &["commit", "-m", "initial"])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn git_capacity_paths_resolve_relative_gitfile_and_shared_commondir() {
+        let t=tempfile::tempdir().unwrap();let project=t.path().join("project");let admin=t.path().join("admin");let common=t.path().join("shared.git");
+        for path in [&project,&admin,&common] {std::fs::create_dir(path).unwrap();}
+        std::fs::write(project.join(".git"),"gitdir: ../admin\n").unwrap();
+        std::fs::write(admin.join("commondir"),"../shared.git\n").unwrap();
+        assert_eq!(git_storage_paths(&project).await.unwrap(),vec![admin,common]);
     }
 
     #[tokio::test]

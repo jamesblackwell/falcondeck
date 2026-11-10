@@ -1,3 +1,4 @@
+import { StoragePressure } from "./components/StoragePressure";
 import type { NotificationRecord, ProjectFolderMutation, Review } from '@falcondeck/client-core';
 import { resolveThreadLinkTarget, reviewInboxEnabled } from "@falcondeck/client-core";
 import { ThreadLinkProvider } from "@falcondeck/chat-ui";
@@ -920,6 +921,7 @@ function AppInner() {
     setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
   }, []);
+  const openStorageSettings = useCallback(() => openSettingsSection("storage"), [openSettingsSection]);
   const openSpeechSettings = useCallback(
     () => openSettingsSection("speech"),
     [openSettingsSection],
@@ -4432,6 +4434,8 @@ function AppInner() {
     (notices: NotificationRecord[]) => {
       if (notificationsPrefs && !notificationsPrefs.enabled) return;
       for (const notice of notices.slice(0, 3)) {
+        // StoragePressure owns the daily local alert and its Settings action.
+        if (notice.title === "Storage is running low" && !notice.thread_id && !notice.workspace_id) continue;
         if (document.hasFocus() && isTicketsOpen && isNotificationsActive) continue;
         // As with reviews, the native notification has no click callback here.
         if (!document.hasFocus() && notice.has_body) {
@@ -6035,6 +6039,7 @@ function AppInner() {
   }, []);
   return (
     <>
+      <StoragePressure baseUrl={baseUrl} onOpenStorage={openStorageSettings} onToast={toast} />
       <ExternalLinkHandler
         onOpenLocalFile={
           isRemoteWorkspaceSelected || isCloudThread ? undefined : openLinkedFile
