@@ -38,6 +38,13 @@ async fn discover(claude_bin: &str) -> Vec<DiscoveredClaudeModel> {
 }
 
 async fn probe(claude_bin: &str) -> Option<Vec<DiscoveredClaudeModel>> {
+    probe_with_timeout(claude_bin, Duration::from_secs(10)).await
+}
+
+async fn probe_with_timeout(
+    claude_bin: &str,
+    limit: Duration,
+) -> Option<Vec<DiscoveredClaudeModel>> {
     let mut command = Command::new(claude_bin);
     command.args([
         "--safe-mode",
@@ -60,27 +67,66 @@ async fn probe(claude_bin: &str) -> Option<Vec<DiscoveredClaudeModel>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     strip_terminal_advertising_env(&mut command);
     if let Some(path) = preferred_command_path(claude_bin) {
         command.env("PATH", path);
     }
     crate::agent_binary::validate_provider_command(&mut command).ok()?;
-    let output = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut child = command.spawn().ok()?;
+    // Keep the group guard outside the timeout so success, failure and
+    // cancellation all clean up descendants, even after the leader exits.
+    let mut child = command.spawn().ok()?;
+    let _group = crate::agent_binary::ProbeProcessGroup(child.id());
+    tokio::time::timeout(limit, async {
         let mut stdin = child.stdin.take()?;
         stdin.write_all(b"{\"type\":\"control_request\",\"request_id\":\"catalog\",\"request\":{\"subtype\":\"initialize\"}}\n").await.ok()?;
         drop(stdin);
-        child.wait_with_output().await.ok()
-    }).await.ok()??;
-    if !output.status.success() {
-        return None;
+        let models = read_catalog(child.stdout.take()?).await?;
+        child.wait().await.ok()?.success().then_some(models)
+    }).await.ok()?
+}
+
+const MAX_CATALOG_OUTPUT: u64 = 1024 * 1024;
+const MAX_CATALOG_LINE: usize = 256 * 1024;
+
+async fn read_catalog(
+    stdout: impl tokio::io::AsyncRead + Unpin,
+) -> Option<Vec<DiscoveredClaudeModel>> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let mut reader = BufReader::new(stdout.take(MAX_CATALOG_OUTPUT + 1));
+    let mut total = 0;
+    let mut line = Vec::new();
+    let mut models = None;
+    loop {
+        let available = reader.fill_buf().await.ok()?;
+        if available.is_empty() {
+            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                if let Some(found) = parse_initialize_models(&value) {
+                    models = Some(found);
+                }
+            }
+            return models;
+        }
+        let len = available
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(available.len(), |i| i + 1);
+        total += len;
+        if total > MAX_CATALOG_OUTPUT as usize || line.len() + len > MAX_CATALOG_LINE {
+            return None;
+        }
+        line.extend_from_slice(&available[..len]);
+        reader.consume(len);
+        if line.last() == Some(&b'\n') {
+            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                if let Some(found) = parse_initialize_models(&value) {
+                    models = Some(found);
+                }
+            }
+            line.clear();
+        }
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| {
-            let value: Value = serde_json::from_str(line).ok()?;
-            parse_initialize_models(&value)
-        })
 }
 
 fn parse_initialize_models(value: &Value) -> Option<Vec<DiscoveredClaudeModel>> {
@@ -130,6 +176,51 @@ pub(super) async fn list_models_for_bin(claude_bin: &str) -> Vec<ModelSummary> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn catalog_output_and_lines_are_bounded_before_parsing() {
+        let valid = br#"{"type":"control_response","response":{"subtype":"success","request_id":"catalog","response":{"models":[]}}}"#;
+        assert_eq!(read_catalog(&valid[..]).await, Some(Vec::new()));
+        assert!(
+            read_catalog(&vec![b'x'; MAX_CATALOG_LINE + 1][..])
+                .await
+                .is_none()
+        );
+        let mut output = Vec::new();
+        for _ in 0..(MAX_CATALOG_OUTPUT as usize / 2 + 1) {
+            output.extend_from_slice(b"x\n");
+        }
+        assert!(read_catalog(&output[..]).await.is_none());
+        output.extend_from_slice(valid);
+        assert!(read_catalog(&output[..]).await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hanging_catalog_kills_descendants_and_returns_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("claude");
+        let marker = temp.path().join("leaked-child");
+        fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nread request\n(/bin/sleep 0.4; /usr/bin/touch '{}') &\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            probe_with_timeout(bin.to_str().unwrap(), Duration::from_millis(50))
+                .await
+                .is_none()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!marker.exists(), "catalog descendant survived timeout");
+        let models = list_models_for_bin("/missing-test-claude").await;
+        assert!(models.iter().any(|m| m.id == "sonnet" && m.is_default));
+    }
+
     use super::*;
 
     #[test]

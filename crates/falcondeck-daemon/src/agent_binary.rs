@@ -160,6 +160,14 @@ fn test_fixture_binary(configured: &str) -> bool {
 }
 
 pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryResolution {
+    resolve_agent_binary_inner(bin_name, configured, true)
+}
+
+fn resolve_agent_binary_inner(
+    bin_name: &str,
+    configured: &str,
+    login_shell: bool,
+) -> AgentBinaryResolution {
     let configured = configured.trim();
     let fixture_interpreter = matches!(
         Path::new(bin_name).file_name().and_then(OsStr::to_str),
@@ -268,7 +276,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
         };
     }
 
-    if let Some(path) = resolve_from_login_shell(bin_name) {
+    if login_shell && let Some(path) = resolve_from_login_shell(bin_name) {
         diagnostics.searched_login_shell = true;
         return AgentBinaryResolution {
             executable: path,
@@ -276,13 +284,123 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
             diagnostics,
         };
     }
-    diagnostics.searched_login_shell = true;
+    diagnostics.searched_login_shell = login_shell;
 
     AgentBinaryResolution {
         executable: configured.to_string(),
         source: BinaryResolutionSource::Unknown,
         diagnostics,
     }
+}
+
+/// Bounded, single-flight discovery for async metadata consumers. Missing
+/// installations are cached too; filesystem checks run outside async workers.
+pub(crate) async fn resolve_agent_binary_cached_async(
+    bin_name: &str,
+    configured: &str,
+) -> AgentBinaryResolution {
+    type Key = (
+        String,
+        String,
+        Option<OsString>,
+        Option<OsString>,
+        Option<OsString>,
+    );
+    type Cache = HashMap<Key, (std::time::Instant, AgentBinaryResolution)>;
+    static CACHE: std::sync::OnceLock<tokio::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let key = (
+        bin_name.into(),
+        configured.into(),
+        env::var_os("PATH"),
+        env::var_os("HOME"),
+        env::var_os("SHELL"),
+    );
+    let mut cache = CACHE.get_or_init(Default::default).lock().await;
+    if let Some((fetched, resolved)) = cache.get(&key)
+        && fetched.elapsed() < Duration::from_secs(60)
+    {
+        return resolved.clone();
+    }
+    let name = bin_name.to_owned();
+    let config = configured.to_owned();
+    let mut resolved =
+        tokio::task::spawn_blocking(move || resolve_agent_binary_inner(&name, &config, false))
+            .await
+            .expect("binary resolution worker panicked");
+    if resolved.source == BinaryResolutionSource::Unknown && !provider_test_mode() {
+        resolved.diagnostics.searched_login_shell = true;
+        let shell = env::var("SHELL").unwrap_or_else(|_| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh".into()
+            } else {
+                "/bin/sh".into()
+            }
+        });
+        if let Some(path) =
+            resolve_from_login_shell_async(&shell, bin_name, LOGIN_SHELL_ENV_TIMEOUT).await
+        {
+            resolved.executable = path;
+            resolved.source = BinaryResolutionSource::LoginShell;
+        }
+    }
+    cache.retain(|_, (fetched, _)| fetched.elapsed() < Duration::from_secs(60));
+    cache.insert(key, (std::time::Instant::now(), resolved.clone()));
+    resolved
+}
+
+/// Retain the group id after the leader exits so inherited pipes and helpers
+/// cannot outlive a bounded metadata probe. Matches normal Claude turn cleanup.
+pub(crate) struct ProbeProcessGroup(pub Option<u32>);
+
+impl Drop for ProbeProcessGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            // SAFETY: probe children are launched in their own process group.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
+}
+
+async fn resolve_from_login_shell_async(
+    shell: &str,
+    bin_name: &str,
+    limit: Duration,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+    // Only a binary name is interpolated into the shell program.
+    if !bin_name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    {
+        return None;
+    }
+    let mut command = TokioCommand::new(shell);
+    command
+        .args(["-l", "-c", &format!("command -v {bin_name}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().ok()?;
+    let _group = ProbeProcessGroup(child.id());
+    let mut stdout = child.stdout.take()?.take(16 * 1024 + 1);
+    let output = timeout(limit, async {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.ok()?;
+        if bytes.len() > 16 * 1024 || !child.wait().await.ok()?.success() {
+            return None;
+        }
+        Some(bytes)
+    })
+    .await
+    .ok()??;
+    let path = String::from_utf8(output).ok()?.trim().to_owned();
+    tokio::task::spawn_blocking(move || normalize_existing_path(Path::new(&path)))
+        .await
+        .ok()?
 }
 
 fn is_packaged_macos_executable(path: &Path) -> bool {
@@ -610,13 +728,89 @@ fn push_unique_path(entries: &mut Vec<PathBuf>, entry: PathBuf) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_discovery_caches_missing_and_successful_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("nested/../claude");
+        std::fs::create_dir(temp.path().join("nested")).unwrap();
+        let configured = missing.to_str().unwrap();
+        let first = resolve_agent_binary_cached_async("sh", configured).await;
+        assert!(!Path::new(&first.executable).exists());
+        let actual = temp.path().join("claude");
+        std::fs::write(&actual, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&actual, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A newly installed binary does not rerun a negatively cached lookup.
+        assert_eq!(
+            resolve_agent_binary_cached_async("sh", configured)
+                .await
+                .executable,
+            first.executable
+        );
+        let configured = actual.to_str().unwrap();
+        let first = resolve_agent_binary_cached_async("sh", configured).await;
+        assert_eq!(
+            first.executable,
+            actual.canonicalize().unwrap().to_string_lossy()
+        );
+        std::fs::remove_file(&actual).unwrap();
+        assert_eq!(
+            resolve_agent_binary_cached_async("sh", configured)
+                .await
+                .executable,
+            first.executable
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn login_shell_discovery_is_bounded_and_cleans_up_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let shell = temp.path().join("shell");
+        let marker = temp.path().join("leaked-child");
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\n(/bin/sleep 0.4; /usr/bin/touch '{}') &\nwait\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            resolve_from_login_shell_async(
+                shell.to_str().unwrap(),
+                "claude",
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_none());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!marker.exists(), "shell descendant survived timeout");
+        assert!(
+            resolve_from_login_shell_async(
+                "/missing-test-shell",
+                "claude",
+                Duration::from_millis(50)
+            )
+            .await
+            .is_none()
+        );
+    }
+
     use std::{
         ffi::OsString,
         path::{Path, PathBuf},
     };
 
     use super::{
-        ResolutionDiagnostics, TokioCommand, build_preferred_command_path,
+        Duration, ResolutionDiagnostics, TokioCommand, build_preferred_command_path,
+        resolve_agent_binary_cached_async, resolve_from_login_shell_async,
         command_output_with_timeout, known_location_paths, missing_binary_message,
         parse_login_shell_environment,
     };

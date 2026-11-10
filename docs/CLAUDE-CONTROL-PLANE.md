@@ -29,12 +29,17 @@ from March 2026 docs.
 
 The `initialize` **control response** contains `models` with `value`,
 `displayName`, and `resolvedModel`; this is distinct from the `system` init
-event in the original probe. Lazy workspace placeholders, connection, and metadata refresh now
+event in the original probe. Connection and metadata refresh now
 query this catalog through `claude -p` stream-json without a user message or
 model generation. The probe disables project configuration, hooks, plugins,
-MCP servers, and session persistence. It is bounded to ten seconds and shared
-across workspaces for sixty seconds; replacing the executable invalidates it
-immediately. Live labels override curated aliases and their full-context
+MCP servers, and session persistence. The subprocess has a ten-second timeout,
+a 1 MiB stdout cap, and a 256 KiB line cap; its process group is killed on exit
+or cancellation. Binary discovery runs filesystem work off the async runtime
+and gives login-shell discovery five seconds. Resolution, including missing
+installations, is shared for sixty seconds. Catalog results are also shared for
+sixty seconds; replacing the resolved executable invalidates catalog results
+on the next query (a changed symlink target may wait for resolution expiry).
+Lazy workspace placeholders publish the local fallback without CLI discovery. Live labels override curated aliases and their full-context
 variants, and additional advertised IDs are appended. The local config and
 curated catalog remain the fallback for older or unavailable CLIs.
 

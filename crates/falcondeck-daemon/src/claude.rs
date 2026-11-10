@@ -258,7 +258,8 @@ impl ClaudeRuntime {
         workspace_path: String,
         claude_bin: String,
     ) -> Result<ClaudeBootstrap, DaemonError> {
-        let resolved = resolve_agent_binary("claude", &claude_bin);
+        let resolved =
+            crate::agent_binary::resolve_agent_binary_cached_async("claude", &claude_bin).await;
         let runtime = Self::for_workspace(workspace_path.clone(), claude_bin);
 
         let (account, models) = tokio::join!(
@@ -934,7 +935,8 @@ impl ClaudeRuntime {
     }
 
     pub async fn provider_metadata(&self) -> ClaudeProviderMetadata {
-        let resolved = resolve_agent_binary("claude", &self.claude_bin);
+        let resolved =
+            crate::agent_binary::resolve_agent_binary_cached_async("claude", &self.claude_bin).await;
         let (account, models) = tokio::join!(
             auth_cache::refresh_auth_status(&resolved.executable),
             model_catalog::list_models_for_bin(&resolved.executable)
@@ -1658,8 +1660,8 @@ async fn read_additional_model_options() -> Vec<DiscoveredClaudeModel> {
 
 /// Machine catalog, also used by lazy workspace placeholders on mobile.
 pub async fn list_models() -> Vec<ModelSummary> {
-    let resolved = resolve_agent_binary("claude", "claude");
-    model_catalog::list_models_for_bin(&resolved.executable).await
+    // Startup placeholders must never depend on provider discovery or a CLI.
+    fallback_models().await
 }
 
 async fn fallback_models() -> Vec<ModelSummary> {
@@ -1670,7 +1672,7 @@ async fn fallback_models() -> Vec<ModelSummary> {
 pub async fn read_auth_status(claude_bin: &str) -> AccountSummary {
     // `claude auth status` can hang on network checks; never let it block
     // workspace connect or the periodic metadata refresh.
-    let resolved = resolve_agent_binary("claude", claude_bin);
+    let resolved = crate::agent_binary::resolve_agent_binary_cached_async("claude", claude_bin).await;
     let claude_bin = resolved.executable.as_str();
     let mut command = Command::new(claude_bin);
     command

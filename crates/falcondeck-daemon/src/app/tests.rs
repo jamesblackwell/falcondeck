@@ -14,6 +14,80 @@ use falcondeck_core::{
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
 
+#[cfg(unix)]
+#[tokio::test]
+async fn placeholder_registration_does_not_wait_for_hanging_or_missing_claude_discovery() {
+    const CHILD: &str = "FALCONDECK_PLACEHOLDER_DISCOVERY_CHILD";
+    let temp = tempfile::tempdir().unwrap();
+    if std::env::var_os(CHILD).is_none() {
+        // Set PATH only in a child test process, avoiding global env races.
+        // The old placeholder path probes this sleeping CLI and times out.
+        for hanging in [true, false] {
+            for name in ["agy", "claude", "codex", "cursor-agent", "opencode", "open"] {
+                let bin = temp.path().join(name);
+                let script = if hanging && name == "claude" {
+                    "#!/bin/sh\nexec /bin/sleep 30\n"
+                } else {
+                    "#!/bin/sh\nexit 1\n"
+                };
+                std::fs::write(&bin, script).unwrap();
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let mut paths = vec![temp.path().to_path_buf()];
+            paths.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "app::tests::placeholder_registration_does_not_wait_for_hanging_or_missing_claude_discovery", "--nocapture"])
+                .env(CHILD, "1").env("PATH", std::env::join_paths(paths).unwrap())
+                .env("FALCONDECK_TEST_NO_PROVIDERS", "1").kill_on_drop(true).process_group(0);
+            let mut child = command.spawn().unwrap();
+            let _group = crate::agent_binary::ProbeProcessGroup(child.id());
+            let status = tokio::time::timeout(TokioDuration::from_secs(5), child.wait())
+                .await
+                .expect("placeholder test subprocess hung")
+                .unwrap();
+            assert!(
+                status.success(),
+                "placeholder registration blocked on Claude discovery"
+            );
+        }
+        return;
+    }
+    let app = AppState::new_with_state_path(
+        "test".into(),
+        HashMap::new(),
+        temp.path().join("state.json"),
+    );
+    for id in ["first-workspace", "second-workspace"] {
+        let persisted = super::PersistedWorkspaceState {
+            path: temp.path().join(id).to_string_lossy().into_owned(),
+            id: Some(id.into()),
+            ..Default::default()
+        };
+        let summary = tokio::time::timeout(
+            TokioDuration::from_secs(1),
+            app.restore_workspace_placeholder(&persisted, WorkspaceStatus::Connecting, None),
+        )
+        .await
+        .expect("Claude discovery must not delay registration")
+        .unwrap();
+        let models = &summary
+            .agents
+            .iter()
+            .find(|agent| agent.provider == AgentProvider::CLAUDE)
+            .unwrap()
+            .models;
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id == "sonnet" && model.is_default)
+        );
+        assert!(models.iter().any(|model| model.id == "fable"));
+    }
+    assert_eq!(app.inner.workspaces.lock().await.len(), 2);
+}
+
 #[tokio::test]
 async fn default_test_apps_do_not_share_or_read_the_user_state_directory() {
     let first = AppState::new("test".into(), HashMap::new());
