@@ -143,10 +143,3 @@ export function SubagentBadge({
     </Badge>
   )
 }
-
-/** Stable identity for memo comparators. */
-export function subagentsKey(agents: ActiveSubagent[] | undefined) {
-  return (agents ?? [])
-    .map((a) => `${a.id}:${a.label}:${a.agent_type ?? ''}:${a.background ? 1 : 0}`)
-    .join('|')
-}

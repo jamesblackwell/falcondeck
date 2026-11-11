@@ -1,8 +1,27 @@
 import type {
+  ActiveSubagent,
   InteractiveRequest,
   ThreadAttentionLevel,
   ThreadSummary,
 } from './types'
+
+/** Whether two running-sub-agent lists render the same. Snapshots rebuild
+ * every array, so compare by value. `started_at` is fixed per id. */
+export function sameActiveSubagents(
+  current: ActiveSubagent[] | undefined,
+  next: ActiveSubagent[] | undefined,
+) {
+  const a = current ?? []
+  const b = next ?? []
+  if (a.length !== b.length) return false
+  return a.every(
+    (agent, index) =>
+      agent.id === b[index]?.id &&
+      agent.label === b[index]?.label &&
+      (agent.agent_type ?? null) === (b[index]?.agent_type ?? null) &&
+      (agent.background ?? false) === (b[index]?.background ?? false),
+  )
+}
 
 export type ThreadAttentionPresentation = {
   level: ThreadAttentionLevel

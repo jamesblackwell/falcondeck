@@ -5,6 +5,7 @@ import { Archive, ArchiveRestore, Bot, CalendarClock, CircleStop, Cloud, Pin, Sp
 
 import {
   deriveThreadAttentionPresentation,
+  sameActiveSubagents,
   wasTurnInterruptedByShutdown,
   type ThreadSummary,
   type ThreadTag,
@@ -12,7 +13,7 @@ import {
 import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 
 import { ProviderIcon } from './provider-icon'
-import { SubagentLines, subagentsKey } from './subagent-activity'
+import { SubagentLines } from './subagent-activity'
 import { ThreadStageIcon } from './thread-stage-icon'
 import { WorkspaceIcon } from './workspace-icon'
 
@@ -575,8 +576,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.attention.pending_approval_count === b.attention.pending_approval_count &&
     a.attention.pending_question_count === b.attention.pending_question_count &&
     a.attention.background_task_count === b.attention.background_task_count &&
-    subagentsKey(a.attention.active_subagents) ===
-      subagentsKey(b.attention.active_subagents) &&
+    sameActiveSubagents(a.attention.active_subagents, b.attention.active_subagents) &&
     a.attention.last_agent_activity_seq ===
       b.attention.last_agent_activity_seq &&
     a.attention.last_read_seq === b.attention.last_read_seq

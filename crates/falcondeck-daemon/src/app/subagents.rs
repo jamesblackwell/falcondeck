@@ -18,7 +18,8 @@ pub(super) fn is_subagent_tool(tool_kind: &str) -> bool {
 pub(super) struct SubagentTracker {
     /// Keyed by spawning tool call id.
     entries: BTreeMap<String, Entry>,
-    /// Background task id -> spawning tool call id.
+    /// Agent task id -> spawning tool call id. Claude gives every agent a
+    /// task; this is how a `task_notification` finds its entry.
     tasks: BTreeMap<String, String>,
     dirty: bool,
 }
@@ -56,32 +57,34 @@ impl SubagentTracker {
                 .and_then(|v| v.get("run_in_background"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let label = text("description").unwrap_or_else(|| title.to_string());
+            let description = text("description");
             let agent_type = text("subagent_type");
             match self.entries.get_mut(id) {
                 None => {
                     self.entries.insert(id.to_string(), Entry {
-                        label,
+                        label: description.unwrap_or_else(|| title.to_string()),
                         agent_type,
                         started_at: Utc::now(),
                         background,
                     });
                     self.dirty = true;
                 }
-                // Streaming repeats the call, sometimes without input; only
-                // a repeat that adds information is a change.
-                Some(entry) if input.is_some() => {
-                    let changed = entry.label != label
-                        || entry.agent_type != agent_type
-                        || (background && !entry.background);
-                    if changed {
+                // Streaming repeats the call, with partial or no input. Fill
+                // in what a repeat adds; never erase what an earlier one had.
+                Some(entry) => {
+                    if let Some(label) = description.filter(|l| *l != entry.label) {
                         entry.label = label;
+                        self.dirty = true;
+                    }
+                    if agent_type.is_some() && entry.agent_type != agent_type {
                         entry.agent_type = agent_type;
-                        entry.background |= background;
+                        self.dirty = true;
+                    }
+                    if background && !entry.background {
+                        entry.background = true;
                         self.dirty = true;
                     }
                 }
-                Some(_) => {}
             }
             return;
         }
@@ -122,13 +125,18 @@ impl SubagentTracker {
         }
     }
 
-    /// `background_tasks_changed` lists every live task, so a known agent
-    /// task missing from it has ended even if its notification was lost.
+    /// `background_tasks_changed` lists the live background tasks, so a
+    /// background agent missing from it has ended even if its notification
+    /// was lost. Foreground agents are left alone: whether the list includes
+    /// their tasks is not established, and their tool result ends them.
     pub(super) fn retain_tasks(&mut self, live: &HashSet<String>) {
         let gone: Vec<(String, String)> = self
             .tasks
             .iter()
-            .filter(|(task_id, _)| !live.contains(*task_id))
+            .filter(|(task_id, tool_id)| {
+                !live.contains(*task_id)
+                    && self.entries.get(*tool_id).is_some_and(|e| e.background)
+            })
             .map(|(t, id)| (t.clone(), id.clone()))
             .collect();
         for (task_id, id) in gone {
@@ -143,6 +151,8 @@ impl SubagentTracker {
         let before = self.entries.len();
         self.entries.retain(|_, entry| entry.background);
         self.dirty |= self.entries.len() != before;
+        let entries = &self.entries;
+        self.tasks.retain(|_, tool_id| entries.contains_key(tool_id));
     }
 
     fn remove(&mut self, id: &str) {
@@ -238,6 +248,42 @@ mod tests {
         assert!(t.take_changed().is_none());
         t.task_finished("task-1", None);
         assert_eq!(t.take_changed().unwrap(), vec![]);
+    }
+
+    #[test]
+    fn background_list_does_not_end_a_running_foreground_agent() {
+        let mut t = SubagentTracker::default();
+        t.tool_event("a", "Agent", "x", "running", Some(&json!({"description": "Scan"})));
+        t.agent_task_started("task-1", "a");
+        t.take_changed();
+        // A backgrounded shell command changes the list mid-agent.
+        t.retain_tasks(&HashSet::from(["shell-1".to_string()]));
+        assert!(t.take_changed().is_none());
+        t.task_finished("task-1", Some("a"));
+        assert_eq!(t.take_changed().unwrap(), vec![]);
+    }
+
+    #[test]
+    fn partial_repeats_fill_in_without_erasing() {
+        let mut t = SubagentTracker::default();
+        t.tool_event("a", "Agent", "Agent", "running", Some(&json!({"subagent_type": "Explore"})));
+        assert_eq!(t.take_changed().unwrap()[0].label, "Agent");
+        t.tool_event("a", "Agent", "Agent", "running", Some(&json!({"description": "Scan"})));
+        let list = t.take_changed().unwrap();
+        assert_eq!(list[0].label, "Scan");
+        assert_eq!(list[0].agent_type.as_deref(), Some("Explore"));
+        t.tool_event("a", "Agent", "Agent", "running", Some(&json!({})));
+        assert!(t.take_changed().is_none());
+    }
+
+    #[test]
+    fn parking_drops_foreground_agents_and_their_task_ids() {
+        let mut t = SubagentTracker::default();
+        t.tool_event("a", "Agent", "x", "running", Some(&json!({})));
+        t.agent_task_started("task-1", "a");
+        t.clear_foreground();
+        assert_eq!(t.take_changed().unwrap(), vec![]);
+        assert!(t.tasks.is_empty());
     }
 
     #[test]
