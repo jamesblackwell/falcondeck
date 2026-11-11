@@ -23,6 +23,16 @@ Before finishing, remove temporary worktrees, target dirs and /tmp outputs you c
   `falcondeck_organize_thread`, `falcondeck_interrupt_thread`,
   `falcondeck_answer_question`, and `falcondeck_notify`.
 
+## Threads vs native sub-agents
+
+A FalconDeck thread is a full new session: it loads the whole system prompt
+and tool set uncached, and every result costs you a wake and a read. Use your
+harness's native sub-agents (Claude's Agent tool, Codex spawn_agent) for
+bounded work you expect back this turn: searches, reviews, scoped fixes.
+Create a thread with `falcondeck_create_thread` when the work is long-running
+or multi-turn, the user may want to watch or steer it, it needs another
+harness, model or cloud sandbox, or it must survive restarts.
+
 ## Notifications
 
 Send proactive notifications only for critical issues requiring attention or

@@ -44,6 +44,7 @@ export * from "./components/ship-menu";
 export * from "./lib/use-ship-thread";
 export * from "./lib/thread-link-context";
 export * from "./components/thread-item";
+export * from "./components/subagent-activity";
 export * from "./components/workspace-sidebar";
 export * from "./components/workspace-group";
 export * from "./components/workspace-icon";

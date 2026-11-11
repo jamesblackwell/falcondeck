@@ -12,6 +12,7 @@ import {
 import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 
 import { ProviderIcon } from './provider-icon'
+import { SubagentLines, subagentsKey } from './subagent-activity'
 import { ThreadStageIcon } from './thread-stage-icon'
 import { WorkspaceIcon } from './workspace-icon'
 
@@ -152,7 +153,9 @@ export const ThreadItem = memo(
       [thread.updated_at],
     )
 
-    return (
+    const subagents = thread.attention.active_subagents ?? []
+
+    const row = (
       <div
         onPointerDown={
           canDrag
@@ -476,6 +479,18 @@ export const ThreadItem = memo(
         )}
       </div>
     )
+    if (subagents.length === 0 || thread.is_archived) return row
+    return (
+      <>
+        {row}
+        <SubagentLines
+          agents={subagents}
+          depth={depth}
+          trunkMask={trunkMask}
+          nowTick={nowTick}
+        />
+      </>
+    )
   },
   (prev, next) =>
     // Snapshot refreshes recreate every thread object, so identity comparison
@@ -560,6 +575,8 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.attention.pending_approval_count === b.attention.pending_approval_count &&
     a.attention.pending_question_count === b.attention.pending_question_count &&
     a.attention.background_task_count === b.attention.background_task_count &&
+    subagentsKey(a.attention.active_subagents) ===
+      subagentsKey(b.attention.active_subagents) &&
     a.attention.last_agent_activity_seq ===
       b.attention.last_agent_activity_seq &&
     a.attention.last_read_seq === b.attention.last_read_seq

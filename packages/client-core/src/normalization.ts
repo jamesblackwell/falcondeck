@@ -805,6 +805,9 @@ export function normalizeThreadSummary(
       pending_approval_count: thread.attention?.pending_approval_count ?? 0,
       pending_question_count: thread.attention?.pending_question_count ?? 0,
       background_task_count: thread.attention?.background_task_count ?? 0,
+      active_subagents: Array.isArray(thread.attention?.active_subagents)
+        ? thread.attention.active_subagents
+        : [],
       last_agent_activity_seq: thread.attention?.last_agent_activity_seq ?? 0,
       last_read_seq: thread.attention?.last_read_seq ?? 0,
     },

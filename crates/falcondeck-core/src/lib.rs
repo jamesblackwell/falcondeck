@@ -4610,12 +4610,35 @@ pub struct ThreadAttention {
     /// report. The thread is idle, but the agent is not done with it.
     #[serde(default)]
     pub background_task_count: u32,
+    /// Native harness sub-agents (Claude's `Agent` tool) currently running
+    /// for this thread, oldest first. Live-only: never persisted, and cleared
+    /// when the harness process that owns them exits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_subagents: Vec<ActiveSubagent>,
     /// Last agent-originated event sequence in the thread.
     #[serde(default)]
     pub last_agent_activity_seq: u64,
     /// Last event sequence acknowledged by the user.
     #[serde(default)]
     pub last_read_seq: u64,
+}
+
+/// One running native sub-agent, as advertised on [`ThreadAttention`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveSubagent {
+    /// The spawning tool call id; matches the transcript's tool card.
+    pub id: String,
+    /// Short human label: the agent's task description.
+    pub label: String,
+    /// Harness agent type, e.g. `Explore` or `general-purpose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// When the daemon first saw the spawning tool call.
+    pub started_at: chrono::DateTime<Utc>,
+    /// Launched with `run_in_background`: its tool card has settled but the
+    /// agent keeps working until it reports.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// Explicit wait declared by a delegated task or its coordinator.

@@ -1467,6 +1467,33 @@ impl AppState {
         }
     }
 
+    /// Republishes the thread's running native sub-agents. The tracker only
+    /// yields a list when it changed, so this always broadcasts.
+    async fn publish_active_subagents(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        list: Vec<falcondeck_core::ActiveSubagent>,
+    ) {
+        let mut changed = false;
+        let updated = self
+            .with_thread_mut(workspace_id, thread_id, |thread| {
+                changed = thread.attention.active_subagents != list;
+                thread.attention.active_subagents = list;
+            })
+            .await;
+        if updated.is_err() || !changed {
+            return;
+        }
+        if let Ok(thread) = self.thread_summary(workspace_id, thread_id).await {
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
+    }
+
     async fn finalize_claude_turn_at_result(
         &self,
         workspace_id: &str,
@@ -1673,6 +1700,7 @@ impl AppState {
         // below only takes the thread lock when the visible count moves.
         let mut published_background_count = 0u32;
         let mut background_task_tools = HashMap::<String, String>::new();
+        let mut subagents = super::subagents::SubagentTracker::default();
         let mut running_tool_titles = HashMap::<String, String>::new();
         let mut last_line_at = tokio::time::Instant::now();
         let mut stall_warned = false;
@@ -1775,6 +1803,11 @@ impl AppState {
                 {
                     parked_between_turns =
                         runtime.turn_is_parked(&thread_id, turn_generation).await;
+                }
+                // Sub-agents run inside live and parked turns alike.
+                if let Some(list) = subagents.take_changed() {
+                    self.publish_active_subagents(&workspace_id, &thread_id, list)
+                        .await;
                 }
                 // The one place a parked thread's background count is
                 // published. Runs after every line and at least every
@@ -2017,6 +2050,7 @@ impl AppState {
                                 background_tasks = tasks.blocking;
                                 let gate = self.variant_gate(&workspace_id, &thread_id).await;
                                 let _admission = gate.lock().await;
+                                subagents.retain_tasks(&tasks.all);
                                 outstanding_tasks.replace(tasks.all);
                                 let _ = self
                                     .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
@@ -2030,6 +2064,7 @@ impl AppState {
                             if let Some(task) = claude_task_started(&value) {
                                 if task.holds_turn_open {
                                     background_tasks.insert(task.task_id.clone());
+                                    subagents.agent_task_started(&task.task_id, &task.tool_use_id);
                                 }
                                 let gate = self.variant_gate(&workspace_id, &thread_id).await;
                                 let _admission = gate.lock().await;
@@ -2046,6 +2081,7 @@ impl AppState {
                             }
                             if let Some(task) = claude_task_finished(&value) {
                                 background_tasks.remove(&task.task_id);
+                                subagents.task_finished(&task.task_id, task.tool_use_id.as_deref());
                                 {
                                     let gate = self.variant_gate(&workspace_id, &thread_id).await;
                                     let _admission = gate.lock().await;
@@ -2300,6 +2336,13 @@ impl AppState {
                                     if let Some(activity) = subagent_steps.get(&tool_event.id) {
                                         activity.apply(&mut tool_detail);
                                     }
+                                    subagents.tool_event(
+                                        &tool_event.id,
+                                        &tool_kind,
+                                        &title,
+                                        &tool_event.status,
+                                        tool_event.input.as_ref(),
+                                    );
                                     if tool_event.status == "running" {
                                         tool_identity.insert(
                                             tool_event.id.clone(),
@@ -2432,6 +2475,9 @@ impl AppState {
                                         // notifications are what start the
                                         // next one.
                                         running_tool_titles.clear();
+                                        // The turn settled its tool cards;
+                                        // only async agents outlive a park.
+                                        subagents.clear_foreground();
                                         last_line_at = tokio::time::Instant::now();
                                         stall_warned = false;
                                         turn_error = None;
@@ -2651,8 +2697,9 @@ impl AppState {
                 thread.last_error = final_error.clone();
                 // The CLI process is gone, so no background task can wake this
                 // thread again; a leftover count would advertise work that
-                // died with it.
+                // died with it. Its sub-agents died with it too.
                 thread.attention.background_task_count = 0;
+                thread.attention.active_subagents.clear();
                 thread.updated_at = settled_at;
             })
             .await;

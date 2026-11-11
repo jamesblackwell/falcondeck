@@ -4,6 +4,7 @@ import type {
   ImageInput,
   OperationalCondition,
   ServiceNotice,
+  ThreadAttention,
   ThreadSummary,
 } from "./types";
 import {
@@ -487,6 +488,22 @@ function sameOrigin(
   return false;
 }
 
+function sameActiveSubagents(
+  current: ThreadAttention["active_subagents"],
+  next: ThreadAttention["active_subagents"],
+) {
+  const a = current ?? [];
+  const b = next ?? [];
+  if (a.length !== b.length) return false;
+  return a.every(
+    (agent, index) =>
+      agent.id === b[index]?.id &&
+      agent.label === b[index]?.label &&
+      (agent.agent_type ?? null) === (b[index]?.agent_type ?? null) &&
+      (agent.background ?? false) === (b[index]?.background ?? false),
+  );
+}
+
 function sameQueuedTurns(
   current: DaemonSnapshot["threads"][number]["queued_turns"],
   next: DaemonSnapshot["threads"][number]["queued_turns"],
@@ -540,6 +557,10 @@ function isRunningAttentionOnlyUpdate(
       (next.attention.badge_label ?? null) &&
     (current.attention.background_task_count ?? 0) ===
       (next.attention.background_task_count ?? 0) &&
+    sameActiveSubagents(
+      current.attention.active_subagents,
+      next.attention.active_subagents,
+    ) &&
     current.attention.pending_approval_count ===
       next.attention.pending_approval_count &&
     current.attention.pending_question_count ===

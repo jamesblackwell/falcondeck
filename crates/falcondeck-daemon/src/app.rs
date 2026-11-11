@@ -125,6 +125,7 @@ mod speech;
 mod routing;
 mod speech_audio;
 mod startup_resume;
+mod subagents;
 pub(crate) mod storage;
 mod sync_index;
 mod thread_search;

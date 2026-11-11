@@ -6,6 +6,7 @@ import { isThreadWorking, type ThreadSummary, type WorkspaceSummary } from '@fal
 import { ActivityDiamond, Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
 
 import { ProviderIcon } from './provider-icon'
+import { SubagentBadge } from './subagent-activity'
 
 function threadStatusDisplay(status: ThreadSummary['status']) {
   switch (status) {
@@ -95,6 +96,9 @@ export const SessionHeader = memo(function SessionHeader({
               <Badge variant="default" className="h-5 gap-1 px-1.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em]">
                 <Cloud aria-hidden="true" className="h-3 w-3" />Cloud
               </Badge>
+            ) : null}
+            {thread?.attention.active_subagents?.length ? (
+              <SubagentBadge agents={thread.attention.active_subagents} />
             ) : null}
             {thread?.variant ? (
               <Badge

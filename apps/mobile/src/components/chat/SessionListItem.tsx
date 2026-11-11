@@ -1,7 +1,7 @@
 import { memo, useCallback, useMemo } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Bot, Pin } from 'lucide-react-native'
+import { Bot, Pin, Workflow } from 'lucide-react-native'
 
 import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
 import type { ThreadSummary, ThreadTag } from '@falcondeck/client-core'
@@ -52,6 +52,8 @@ function SessionListItemInner({
 }: SessionListItemProps) {
   const { theme } = useUnistyles()
   const presentation = useMemo(() => deriveThreadAttentionPresentation(thread), [thread])
+  const subagents = thread.attention.active_subagents ?? []
+  const subagentCount = subagents.length
   const updatedAtLabel = useMemo(() => {
     // The parent advances this primitive once per minute to refresh relative
     // timestamps without replacing otherwise stable thread objects.
@@ -166,6 +168,19 @@ function SessionListItemInner({
           <Bot size={theme.iconSize.xs} color={theme.colors.fg.muted} />
         </View>
       ) : null}
+      {subagentCount > 0 ? (
+        <View
+          accessible
+          accessibilityRole="text"
+          accessibilityLabel={`${subagentCount} running sub-agent${subagentCount === 1 ? '' : 's'}: ${subagents.map(agent => agent.label).join(', ')}`}
+          style={styles.subagents}
+        >
+          <Workflow size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+          <Text variant="meta" color="muted">
+            {subagentCount}
+          </Text>
+        </View>
+      ) : null}
       {thread.is_pinned || thread.is_pinned_in_project ? (
         <View
           accessible
@@ -241,6 +256,7 @@ const styles = StyleSheet.create((theme) => ({
     width: StyleSheet.hairlineWidth,
   },
   tags: { flexDirection: 'row', alignItems: 'center' },
+  subagents: { flexDirection: 'row', alignItems: 'center', gap: 2 },
   pin: {
     // lucide-react-native copies style onto each path, so rotate the wrapper.
     transform: [{ rotate: '45deg' }],

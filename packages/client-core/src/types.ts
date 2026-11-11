@@ -1254,6 +1254,17 @@ export type ThreadPlan = {
   steps: ThreadPlanStep[];
 };
 
+/** One running native sub-agent. `id` is the spawning tool call id, so it
+ * matches the transcript's tool card. */
+export type ActiveSubagent = {
+  id: string;
+  label: string;
+  agent_type?: string | null;
+  started_at: string;
+  /** Launched in the background; its tool card already settled. */
+  background?: boolean;
+};
+
 export type ThreadAttention = {
   /** Daemon-owned: this logical turn includes input sent directly by the user. */
   reply_to_user?: boolean;
@@ -1268,6 +1279,9 @@ export type ThreadAttention = {
    * finished with it: one of these reporting starts the next turn. Optional
    * because older daemons don't send it. */
   background_task_count?: number;
+  /** Native harness sub-agents (Claude's Agent tool) running right now,
+   * oldest first. Live-only; optional because older daemons omit it. */
+  active_subagents?: ActiveSubagent[];
   last_agent_activity_seq: number;
   last_read_seq: number;
 };
