@@ -1701,6 +1701,10 @@ impl AppState {
         let mut published_background_count = 0u32;
         let mut background_task_tools = HashMap::<String, String>::new();
         let mut subagents = super::subagents::SubagentTracker::default();
+        // A previous monitor that returned early (stale or parked exit) may
+        // have left its list behind; this turn starts from none.
+        self.publish_active_subagents(&workspace_id, &thread_id, Vec::new())
+            .await;
         let mut running_tool_titles = HashMap::<String, String>::new();
         let mut last_line_at = tokio::time::Instant::now();
         let mut stall_warned = false;
@@ -2542,6 +2546,10 @@ impl AppState {
                         .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
                             t.set_claude_task_ownership(turn_generation, false)
                         })
+                        .await;
+                    drop(_admission);
+                    // Background agents die with the parked process.
+                    self.publish_active_subagents(&workspace_id, &thread_id, Vec::new())
                         .await;
                     // A parked process can exit after its result was already
                     // finalized. A reused process is no longer parked, even
