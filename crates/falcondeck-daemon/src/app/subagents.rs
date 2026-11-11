@@ -3,7 +3,7 @@
 //! to their tool cards. The tracker is owned by one Claude monitor loop and
 //! published on [`falcondeck_core::ThreadAttention::active_subagents`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use falcondeck_core::ActiveSubagent;
@@ -85,23 +85,29 @@ impl SubagentTracker {
             }
             return;
         }
-        // A background agent's tool call settles at launch; the agent keeps
-        // running until its task notification. Failures end it either way.
+        // Every agent gets a task, and a foreground agent's task reports
+        // before its tool result. A task still live when the tool call
+        // settles therefore belongs to a background agent: the result was
+        // only a launch receipt, and the agent runs until it reports.
+        // Failures end it either way.
+        let task_live = self.tasks.values().any(|tool_id| tool_id == id);
         if status == "completed"
-            && self.entries.get(id).is_some_and(|entry| entry.background)
+            && let Some(entry) = self.entries.get_mut(id)
+            && (entry.background || task_live)
         {
+            if !entry.background {
+                entry.background = true;
+                self.dirty = true;
+            }
             return;
         }
         self.remove(id);
     }
 
-    /// `task_started` for an async agent: its tool result is a launch receipt.
+    /// `task_started` for an agent, foreground or background. Claude emits
+    /// one for every `Agent` call; the task id is what reports completion.
     pub(super) fn agent_task_started(&mut self, task_id: &str, tool_use_id: &str) {
-        if let Some(entry) = self.entries.get_mut(tool_use_id) {
-            if !entry.background {
-                entry.background = true;
-                self.dirty = true;
-            }
+        if self.entries.contains_key(tool_use_id) {
             self.tasks.insert(task_id.to_string(), tool_use_id.to_string());
         }
     }
@@ -116,9 +122,9 @@ impl SubagentTracker {
         }
     }
 
-    /// `background_tasks_changed` is authoritative for background agents
-    /// whose task id we know.
-    pub(super) fn retain_tasks(&mut self, live: &std::collections::HashSet<String>) {
+    /// `background_tasks_changed` lists every live task, so a known agent
+    /// task missing from it has ended even if its notification was lost.
+    pub(super) fn retain_tasks(&mut self, live: &HashSet<String>) {
         let gone: Vec<(String, String)> = self
             .tasks
             .iter()
@@ -131,19 +137,12 @@ impl SubagentTracker {
         }
     }
 
-    /// The turn ended without parking: foreground agents died with it.
-    /// Background agents survive a park, so callers only use this on exit
-    /// or after a settled (non-parked) turn.
+    /// The turn parked: its tool cards are settled, so any foreground agent
+    /// still listed is over. Background agents outlive the park.
     pub(super) fn clear_foreground(&mut self) {
         let before = self.entries.len();
         self.entries.retain(|_, entry| entry.background);
         self.dirty |= self.entries.len() != before;
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.dirty |= !self.entries.is_empty();
-        self.entries.clear();
-        self.tasks.clear();
     }
 
     fn remove(&mut self, id: &str) {
@@ -178,30 +177,58 @@ impl SubagentTracker {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::HashSet;
 
     #[test]
-    fn foreground_agent_lives_until_its_tool_result() {
+    /// Event order probed from the Claude CLI (Nov 2026): tool_use,
+    /// task_started, task_notification, then the tool result.
+    fn foreground_agent_ends_at_its_task_notification() {
         let mut t = SubagentTracker::default();
         t.tool_event("a", "Agent", "Agent", "running", Some(&json!({
-            "description": "Find relay retries", "subagent_type": "Explore"
+            "description": "Find relay retries", "subagent_type": "Explore",
+            "run_in_background": false
         })));
+        t.agent_task_started("task-1", "a");
         let list = t.take_changed().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].label, "Find relay retries");
         assert_eq!(list[0].agent_type.as_deref(), Some("Explore"));
         assert!(!list[0].background);
         t.tool_event("a", "Agent", "Agent", "running", None);
+        assert!(t.take_changed().is_none());
+        t.task_finished("task-1", Some("a"));
+        assert_eq!(t.take_changed().unwrap(), vec![]);
+        t.tool_event("a", "Agent", "Agent", "completed", None);
+        assert!(t.take_changed().is_none());
+    }
+
+    #[test]
+    fn foreground_agent_without_a_task_ends_at_its_tool_result() {
+        let mut t = SubagentTracker::default();
+        t.tool_event("a", "Task", "Old CLI", "running", Some(&json!({})));
+        t.take_changed();
+        t.tool_event("a", "Task", "Old CLI", "completed", None);
+        assert_eq!(t.take_changed().unwrap(), vec![]);
+    }
+
+    #[test]
+    fn agent_with_a_live_task_after_its_result_is_background() {
+        let mut t = SubagentTracker::default();
+        t.tool_event("a", "Agent", "Agent", "running", Some(&json!({"description": "Audit"})));
+        t.agent_task_started("task-1", "a");
         t.take_changed();
         t.tool_event("a", "Agent", "Agent", "completed", None);
+        let list = t.take_changed().unwrap();
+        assert!(list[0].background);
+        t.task_finished("task-1", None);
         assert_eq!(t.take_changed().unwrap(), vec![]);
-        assert!(t.take_changed().is_none());
     }
 
     #[test]
     fn background_agent_outlives_its_launch_receipt() {
         let mut t = SubagentTracker::default();
-        t.tool_event("a", "Agent", "Agent", "running", Some(&json!({"description": "Audit"})));
+        t.tool_event("a", "Agent", "Agent", "running", Some(&json!({
+            "description": "Audit", "run_in_background": true
+        })));
         t.agent_task_started("task-1", "a");
         t.tool_event("a", "Agent", "Agent", "completed", None);
         let list = t.take_changed().unwrap();

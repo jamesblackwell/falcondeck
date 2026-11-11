@@ -7,11 +7,14 @@ import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 /** Lines shown under a sidebar row before the rest collapse into "+N more". */
 const MAX_LINES = 3
 
+/**
+ * Minute-granular on purpose: the sidebar clock ticks once a minute, so a
+ * seconds label would freeze between ticks.
+ */
 export function formatSubagentElapsed(startedAt: string, now = Date.now()) {
-  const seconds = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000))
-  if (!Number.isFinite(seconds)) return ''
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
+  const minutes = Math.floor((now - new Date(startedAt).getTime()) / 60_000)
+  if (!Number.isFinite(minutes)) return ''
+  if (minutes < 1) return '<1m'
   if (minutes < 60) return `${minutes}m`
   return `${Math.floor(minutes / 60)}h`
 }
@@ -41,9 +44,14 @@ export type SubagentLinesProps = {
   nowTick?: number
 }
 
-/** Rung geometry shared with ThreadItem's nesting connector. */
+/** Geometry mirrored from ThreadItem: row inset, rung width, upright offset. */
+const ROW_INSET = 10
 const NESTING_RUNG = 14
 const NESTING_LINE = 6
+/** Status slot (16) + its gap (6): where the row's title starts. */
+const TITLE_OFFSET = 22
+/** Gap between a nested row's connector and its title button. */
+const CONNECTOR_GAP = 8
 
 /**
  * Read-only lines under a sidebar thread row naming the native sub-agents it
@@ -65,8 +73,11 @@ export const SubagentLines = memo(function SubagentLines({
       aria-label={`${agents.length} running sub-agent${agents.length === 1 ? '' : 's'}`}
       data-testid="thread-subagents"
       className="@container relative -mt-1 mb-0.5 flex flex-col"
-      // Title column: row padding + status slot + gap, past the elbow.
-      style={{ paddingLeft: depth * NESTING_RUNG + 32 }}
+      // Start under the row's title, past its elbow when nested.
+      style={{
+        paddingLeft:
+          ROW_INSET + TITLE_OFFSET + (depth > 0 ? depth * NESTING_RUNG + CONNECTOR_GAP : 0),
+      }}
     >
       {Array.from({ length: depth }, (_, index) => index + 1)
         .filter((rung) => trunkMask & (1 << (rung - 1)))
@@ -75,7 +86,7 @@ export const SubagentLines = memo(function SubagentLines({
             key={rung}
             aria-hidden="true"
             className="pointer-events-none absolute inset-y-0 border-l border-border-emphasis"
-            style={{ left: 10 + (rung - 1) * NESTING_RUNG + NESTING_LINE }}
+            style={{ left: ROW_INSET + (rung - 1) * NESTING_RUNG + NESTING_LINE }}
           />
         ))}
       {shown.map((agent) => (
@@ -119,7 +130,7 @@ export function SubagentBadge({
   return (
     <Badge
       variant="default"
-      role="status"
+      role="img"
       aria-label={`${agents.length} running sub-${noun}: ${agents.map((a) => a.label).join(', ')}`}
       title={describeSubagents(agents)}
       className={cn(

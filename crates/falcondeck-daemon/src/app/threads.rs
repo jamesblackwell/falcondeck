@@ -1467,8 +1467,8 @@ impl AppState {
         }
     }
 
-    /// Republishes the thread's running native sub-agents. The tracker only
-    /// yields a list when it changed, so this always broadcasts.
+    /// Stores the thread's running native sub-agents and broadcasts the
+    /// summary when the list actually changed.
     async fn publish_active_subagents(
         &self,
         workspace_id: &str,
@@ -2480,7 +2480,8 @@ impl AppState {
                                         // next one.
                                         running_tool_titles.clear();
                                         // The turn settled its tool cards;
-                                        // only async agents outlive a park.
+                                        // only background agents outlive a
+                                        // park.
                                         subagents.clear_foreground();
                                         last_line_at = tokio::time::Instant::now();
                                         stall_warned = false;
@@ -2540,15 +2541,17 @@ impl AppState {
                     return;
                 }
                 Ok(finish) if finish.parked && !finish.interrupted => {
-                    let gate = self.variant_gate(&workspace_id, &thread_id).await;
-                    let _admission = gate.lock().await;
-                    let _ = self
-                        .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
-                            t.set_claude_task_ownership(turn_generation, false)
-                        })
-                        .await;
-                    drop(_admission);
-                    // Background agents die with the parked process.
+                    {
+                        let gate = self.variant_gate(&workspace_id, &thread_id).await;
+                        let _admission = gate.lock().await;
+                        let _ = self
+                            .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
+                                t.set_claude_task_ownership(turn_generation, false)
+                            })
+                            .await;
+                    }
+                    // Background agents die with the parked process. (A
+                    // newer turn's list is safe: that case is `stale` above.)
                     self.publish_active_subagents(&workspace_id, &thread_id, Vec::new())
                         .await;
                     // A parked process can exit after its result was already

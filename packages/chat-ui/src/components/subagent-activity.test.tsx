@@ -70,12 +70,12 @@ describe('sub-agent activity', () => {
 
   it('shows a count badge in the session header', () => {
     render(<SessionHeader workspace={null} thread={thread([agent('a', 'Search'), agent('b', 'Review')])} />)
-    expect(screen.getByRole('status', { name: /2 running sub-agents: Search, Review/ })).toHaveTextContent('2 agents')
+    expect(screen.getByRole('img', { name: /2 running sub-agents: Search, Review/ })).toHaveTextContent('2 agents')
   })
 
   it('formats elapsed time', () => {
     const now = Date.parse('2026-11-11T10:00:00Z')
-    expect(formatSubagentElapsed('2026-11-11T09:59:30Z', now)).toBe('30s')
+    expect(formatSubagentElapsed('2026-11-11T09:59:30Z', now)).toBe('<1m')
     expect(formatSubagentElapsed('2026-11-11T09:55:00Z', now)).toBe('5m')
     expect(formatSubagentElapsed('2026-11-11T07:00:00Z', now)).toBe('3h')
   })
